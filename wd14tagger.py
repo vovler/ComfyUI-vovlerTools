@@ -218,17 +218,17 @@ class WD14TaggerAndImageFilterer:
             "blacklist": ("WD14_BLACKLIST",),
             "threshold": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1, "step": 0.05}),
             "resize_method": (["BILINEAR", "LANCZOS", "BICUBIC"], {"default": "BILINEAR"}),
-            "enable_output_image_tags": ("BOOLEAN", {"default": True}),
+            "enable_print_image_tags": ("BOOLEAN", {"default": True}),
         }}
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("filtered_images", "image_tags")
-    OUTPUT_IS_LIST = (False, False)
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("filtered_images",)
+    OUTPUT_IS_LIST = (False,)
     FUNCTION = "filter_images"
     OUTPUT_NODE = True
     CATEGORY = "vovlerTools"
 
-    def filter_images(self, image, model, csv_data, blacklist, threshold, resize_method="BILINEAR", enable_output_image_tags=True):
+    def filter_images(self, image, model, csv_data, blacklist, threshold, resize_method="BILINEAR", enable_print_image_tags=True):
         # Use model and tags separately instead of combining them
         tags_list = csv_data
         
@@ -349,7 +349,7 @@ class WD14TaggerAndImageFilterer:
         # Pre-compute optimizations based on whether we need tag output
         processed_tags_for_comparison = None
         
-        if enable_output_image_tags:
+        if enable_print_image_tags:
             # Pre-compute processed tags for comparison when we need tag output
             processed_tags_for_comparison = [tag.lower().replace("_", " ") for tag in tags_list]
         
@@ -357,7 +357,7 @@ class WD14TaggerAndImageFilterer:
         filtered_tag_indices = []  # Store indices instead of full strings initially
         
         for i in range(batch_size):
-            if not enable_output_image_tags:
+            if not enable_print_image_tags:
                 # Fast path: only check precompiled blacklisted tag indices, early exit on first match
                 has_blacklisted_tag = False
                 detected_blacklisted_tag = None
@@ -378,7 +378,7 @@ class WD14TaggerAndImageFilterer:
                 else:
                     log(f"Image {i+1}: FILTERED OUT - Blacklisted tag detected: {detected_blacklisted_tag}", "INFO", True)
             else:
-                # Full path: process all tags when we need tag output or no blacklist
+                # Full path: process all tags when we need tag output
                 if processed_tags_for_comparison is None:
                     # Compute on-demand if not pre-computed
                     processed_tags_for_comparison = [tag.lower().replace("_", " ") for tag in tags_list]
@@ -401,19 +401,16 @@ class WD14TaggerAndImageFilterer:
                     log(f"Adding image {i+1} with shape: {single_image.shape}, dtype: {single_image.dtype}, range: {single_image.min():.3f}-{single_image.max():.3f}, device: {single_image.device}", "INFO", True)
                     filtered_images.append(single_image)
                     
-                    # Store the detected tag indices only if we need to output tags
-                    if enable_output_image_tags:
-                        detected_tag_indices = [j for j, tag in enumerate(processed_tags_for_comparison) if tag in detected_tags]
-                        filtered_tag_indices.append(detected_tag_indices)
+                    # Store the detected tag indices for console printing
+                    detected_tag_indices_for_output = [j for j, tag in enumerate(processed_tags_for_comparison) if tag in detected_tags]
+                    filtered_tag_indices.append(detected_tag_indices_for_output)
                     
                     log(f"Image {i+1}: PASSED", "INFO", True)
                 else:
-                    # Image has blacklisted tags
-                    if enable_output_image_tags:
-                        blacklisted_found = detected_tags
-                        log(f"Image {i+1}: FILTERED OUT - Blacklisted tags found: {', '.join(list(blacklisted_found)[:3])}", "INFO", True)
-                    else:
-                        log(f"Image {i+1}: FILTERED OUT - Blacklisted tag detected", "INFO", True)
+                    # Image has blacklisted tags - find which specific tags caused the filtering
+                    blacklisted_indices_found = detected_tag_indices & blacklist
+                    blacklisted_tag_names = [tags_list[idx] for idx in blacklisted_indices_found]
+                    log(f"Image {i+1}: FILTERED OUT - Blacklisted tags found: {', '.join(blacklisted_tag_names[:3])}", "INFO", True)
         
         post_process_time = time.time() - post_process_start
         total_time = total_preprocess_time + inference_time + post_process_time
@@ -427,9 +424,8 @@ class WD14TaggerAndImageFilterer:
             final_images = torch.empty((0, original_images.shape[1], original_images.shape[2], original_images.shape[3]))
             log(f"No images passed filter - returning empty tensor with shape: {final_images.shape}", "INFO", True)
         
-        # Generate formatted tag string for each filtered image
-        combined_tags = ""
-        if enable_output_image_tags and len(filtered_tag_indices) > 0:
+        # Print formatted tag string for each filtered image to console
+        if enable_print_image_tags and len(filtered_tag_indices) > 0:
             # Create formatted output for each filtered image
             image_tag_blocks = []
             for i, tag_indices in enumerate(filtered_tag_indices):
@@ -441,11 +437,9 @@ class WD14TaggerAndImageFilterer:
                 image_block = f"######\nIMAGE_{i+1}: {tag_string}\n######"
                 image_tag_blocks.append(image_block)
             
-            # Combine all image blocks with double newlines
+            # Combine all image blocks with double newlines and print to console
             combined_tags = "\n\n".join(image_tag_blocks)
-        elif not enable_output_image_tags:
-            # Return empty string when output is disabled
-            combined_tags = ""
+            log(f"Detected tags for filtered images:\n{combined_tags}", "INFO", True)
         
         log(f"Filtering complete - {len(filtered_images)}/{batch_size} images passed filter", "INFO", True)
         log(f"Total processing time: {total_time*1000:.2f}ms", "INFO", True)
@@ -454,8 +448,7 @@ class WD14TaggerAndImageFilterer:
         if len(filtered_images) > 0:
             log(f"Average per filtered image: {total_time*1000/len(filtered_images):.2f}ms", "INFO", True)
         
-
-        return (final_images, combined_tags)
+        return (final_images,)
 
     def _batch_resize_gpu(self, tensor, target_height, resize_method):
         """Batch resize images using GPU-accelerated PyTorch"""
