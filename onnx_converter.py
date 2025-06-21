@@ -21,7 +21,6 @@ class SDXLClipToOnnx:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Create dropdowns for all files in the 'clip' directory type
         clip_files = folder_paths.get_filename_list("clip")
         
         return {
@@ -73,8 +72,9 @@ class SDXLClipToOnnx:
                     model_name_or_path=source_model_dir,
                     output=tmpdir,
                     task="feature-extraction",
-                    # CORRECTED: Explicitly tell optimum that the source is a PyTorch model.
                     framework="pt",
+                    # CORRECTED: Explicitly tell optimum which library to use.
+                    library_name="transformers", 
                     no_post_process=True
                 )
 
@@ -107,3 +107,12 @@ class SDXLClipToOnnx:
         self.export_single_clip(clip_g_name, "clip_g", output_clip_dir, optimization_level, use_fp16)
         
         return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{output_clip_dir}"]}}
+
+# --- These are required for ComfyUI to load the node ---
+NODE_CLASS_MAPPINGS = {
+    "SDXLClipToOnnxExporter": SDXLClipToOnnx
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "SDXLClipToOnnxExporter": "Export SDXL CLIPs to ONNX"
+}
