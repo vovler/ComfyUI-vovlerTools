@@ -22,7 +22,6 @@ class SDXLClipToOnnx:
     @classmethod
     def INPUT_TYPES(cls):
         clip_files = folder_paths.get_filename_list("clip")
-        
         return {
             "required": {
                 "clip_l_name": (clip_files, ),
@@ -38,9 +37,11 @@ class SDXLClipToOnnx:
 
     def __init__(self):
         self.gpu_available = False
+        self.device = "cpu"
         providers = onnxruntime.get_available_providers()
         if 'CUDAExecutionProvider' in providers:
             self.gpu_available = True
+            self.device = "cuda"
             print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
         else:
             print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
@@ -55,8 +56,15 @@ class SDXLClipToOnnx:
         if not source_model_path:
              print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find model {clip_filename}. Please ensure it's in a ComfyUI 'clip' model directory.\033[0m")
              return
+        
+        # The directory where the source model file and its config.json are located.
         source_model_dir = os.path.dirname(source_model_path)
+        source_config_path = os.path.join(source_model_dir, "config.json")
 
+        if not os.path.exists(source_config_path):
+            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config.json for {clip_filename} in {source_model_dir}. A config.json is required next to the safetensors file.\033[0m")
+            return
+            
         if os.path.exists(final_onnx_path):
             print(f"[INFO] comfy_onnx_exporter: ONNX model already exists at {final_onnx_path}. Skipping.")
             return
@@ -65,35 +73,44 @@ class SDXLClipToOnnx:
         print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {final_onnx_path}")
 
         try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
-                
-                main_export(
-                    model_name_or_path=source_model_dir,
-                    output=tmpdir,
-                    task="feature-extraction",
-                    framework="pt",
-                    # CORRECTED: Explicitly tell optimum which library to use.
-                    library_name="transformers", 
-                    no_post_process=True
-                )
+            # Create a temporary directory that mimics a standard HuggingFace model repo
+            with tempfile.TemporaryDirectory() as temp_model_dir:
+                # Copy the source files to the temporary directory with the names that `optimum` expects
+                shutil.copyfile(source_model_path, os.path.join(temp_model_dir, "model.safetensors"))
+                shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "config.json"))
 
-                optimizer = ORTOptimizer.from_pretrained(tmpdir)
-                optimization_config = OptimizationConfig(
-                    optimization_level=optimization_level,
-                    fp16=use_fp16
-                )
-                
-                with tempfile.TemporaryDirectory() as tmpdir_optimized:
-                    device_used = "GPU" if self.gpu_available else "CPU"
-                    print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
+                # This temporary directory now contains `model.safetensors` and `config.json`
+                print(f"[INFO] comfy_onnx_exporter: Created temporary model structure at {temp_model_dir}")
+
+                with tempfile.TemporaryDirectory() as tmpdir_export:
+                    print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                     
-                    optimizer.optimize(save_dir=tmpdir_optimized, optimization_config=optimization_config)
+                    main_export(
+                        model_name_or_path=temp_model_dir, # Point to the temporary directory
+                        output=tmpdir_export,
+                        task="feature-extraction",
+                        framework="pt",
+                        library_name="transformers",
+                        device=self.device, # Use GPU for export if available
+                        no_post_process=True
+                    )
 
-                    optimized_model_file = os.path.join(tmpdir_optimized, 'model.onnx')
-                    shutil.move(optimized_model_file, final_onnx_path)
+                    optimizer = ORTOptimizer.from_pretrained(tmpdir_export)
+                    optimization_config = OptimizationConfig(
+                        optimization_level=optimization_level,
+                        fp16=use_fp16
+                    )
+                    
+                    with tempfile.TemporaryDirectory() as tmpdir_optimized:
+                        device_used = "GPU" if self.gpu_available else "CPU"
+                        print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
+                        
+                        optimizer.optimize(save_dir=tmpdir_optimized, optimization_config=optimization_config)
 
-                    print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_key} to:\n{final_onnx_path}\033[0m")
+                        optimized_model_file = os.path.join(tmpdir_optimized, 'model.onnx')
+                        shutil.move(optimized_model_file, final_onnx_path)
+
+                        print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_key} to:\n{final_onnx_path}\033[0m")
 
         except Exception as e:
             print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_key}: {e}\033[0m")
@@ -107,12 +124,3 @@ class SDXLClipToOnnx:
         self.export_single_clip(clip_g_name, "clip_g", output_clip_dir, optimization_level, use_fp16)
         
         return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{output_clip_dir}"]}}
-
-# --- These are required for ComfyUI to load the node ---
-NODE_CLASS_MAPPINGS = {
-    "SDXLClipToOnnxExporter": SDXLClipToOnnx
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "SDXLClipToOnnxExporter": "Export SDXL CLIPs to ONNX"
-}
