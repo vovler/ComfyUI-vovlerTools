@@ -3,7 +3,6 @@ import folder_paths
 import tempfile
 import shutil
 import traceback
-import json
 
 # Required imports
 import onnxruntime
@@ -14,8 +13,8 @@ from optimum.exporters.onnx import main_export
 class SDXLClipToOnnx:
     """
     A ComfyUI node to export SDXL CLIP-L and CLIP-G models to ONNX format.
-    This version loads models directly from .safetensors files, patches their
-    config in-memory for compatibility, and saves them as single .onnx files.
+    This version loads the models directly from .safetensors files provided by the user
+    and saves them as single .onnx files in the /models/clip/ directory.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -59,12 +58,14 @@ class SDXLClipToOnnx:
              return
         
         source_model_dir = os.path.dirname(source_model_path)
+        
+        # CORRECTED: Derive the config filename from the model's filename.
         base_name, _ = os.path.splitext(clip_filename)
         config_filename = f"{base_name}.json"
         source_config_path = os.path.join(source_model_dir, config_filename)
 
         if not os.path.exists(source_config_path):
-            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config file '{config_filename}' for {clip_filename}. A corresponding .json config file is required.\033[0m")
+            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config file '{config_filename}' for {clip_filename} in {source_model_dir}. A corresponding .json config file is required.\033[0m")
             return
             
         if os.path.exists(final_onnx_path):
@@ -76,23 +77,9 @@ class SDXLClipToOnnx:
 
         try:
             with tempfile.TemporaryDirectory() as temp_model_dir:
-                # --- IN-MEMORY CONFIG PATCH ---
-                # Load the original config file
-                with open(source_config_path, 'r') as f:
-                    config_data = json.load(f)
-
-                # If the model_type is the unsupported "clip-text-model", change it to the supported "clip"
-                if config_data.get("model_type") == "clip-text-model":
-                    print("[INFO] comfy_onnx_exporter: Modifying model_type from 'clip-text-model' to 'clip' for compatibility.")
-                    config_data["model_type"] = "clip"
-                
-                # Write the (potentially modified) config to the temporary directory
-                modified_config_path = os.path.join(temp_model_dir, "config.json")
-                with open(modified_config_path, 'w') as f:
-                    json.dump(config_data, f, indent=4)
-                
-                # Copy the model weights file to the temporary directory with the standard name
+                # Copy source files to the temporary directory with the standard names that `optimum` expects
                 shutil.copyfile(source_model_path, os.path.join(temp_model_dir, "model.safetensors"))
+                shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "config.json"))
 
                 print(f"[INFO] comfy_onnx_exporter: Created temporary model structure at {temp_model_dir}")
 
@@ -100,10 +87,11 @@ class SDXLClipToOnnx:
                     print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                     
                     main_export(
-                        model_name_or_path=temp_model_dir, # Point to the directory with the corrected config
+                        model_name_or_path=temp_model_dir,
                         output=tmpdir_export,
                         task="feature-extraction",
                         framework="pt",
+                        library_name="transformers",
                         device=self.device,
                         no_post_process=True
                     )
