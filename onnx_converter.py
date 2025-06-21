@@ -33,6 +33,7 @@ class SDXLClipToOnnx:
         }
 
     RETURN_TYPES = ()
+    # This string must match the method name below.
     FUNCTION = "export_clips_to_onnx"
     
     def __init__(self):
@@ -78,7 +79,7 @@ class SDXLClipToOnnx:
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_name_hint} to ONNX format...")
                 export(model_name_or_path=tmpdir, output=tmpdir, task="feature-extraction")
 
-                # 2. CORRECTED: Instantiate the optimizer from the directory containing the new ONNX model.
+                # 2. Instantiate the optimizer from the directory containing the new ONNX model.
                 optimizer = ORTOptimizer.from_pretrained(tmpdir)
 
                 # 3. Define the optimization configuration.
@@ -100,7 +101,8 @@ class SDXLClipToOnnx:
                 if os.path.exists(output_path):
                     shutil.rmtree(output_path)
 
-    def export_clips_to_onns(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
+    # CORRECTED a typo in the method name here.
+    def export_clips_to_onnx(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
         self.export_single_clip(clip_l, "CLIP-L", optimization_level, use_fp16)
         self.export_single_clip(clip_g, "CLIP-G", optimization_level, use_fp16)
         
