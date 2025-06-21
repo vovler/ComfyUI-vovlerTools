@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
-# CORRECTED: The 'convert' module is inside the 'exporters' subdirectory
+# The 'convert' module is inside the 'exporters' subdirectory
 from optimum.exporters.onnx.convert import export
 from diffusers import StableDiffusionXLPipeline
 from optimum.exporters.onnx.model_configs import VaeEncoderOnnxConfig, VaeDecoderOnnxConfig
@@ -59,11 +59,9 @@ class SDXLDirectoryToOnnx:
         """Helper to optimize a saved ONNX model."""
         try:
             print(f"[INFO] ONNX Exporter: Optimizing {component_name}...")
-            # The optimizer expects a directory containing the model.onnx and config.json
             optimizer = ORTOptimizer.from_pretrained(model_path.parent)
             optimization_config = OptimizationConfig(optimization_level=optimization_level)
             
-            # Save the optimized model back to the same parent directory, replacing the original
             optimizer.optimize(save_dir=model_path.parent, optimization_config=optimization_config)
             print(f"\033[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
         except Exception as e:
@@ -83,19 +81,21 @@ class SDXLDirectoryToOnnx:
         print(f"[INFO] ONNX Exporter: Source model directory: {source_model_dir}")
         print(f"[INFO] ONNX Exporter: Final models will be saved in: {final_output_dir}")
 
-        dtype = torch.float16 if use_fp16 else torch.float32
+        torch_dtype = torch.float16 if use_fp16 else torch.float32
+        # CORRECTED: Use the 'dtype' argument for the export function
+        onnx_dtype = "fp16" if use_fp16 else "fp32"
         pipeline = None
 
         try:
             print("\n[INFO] ONNX Exporter: Loading entire pipeline to resolve component configurations...")
-            pipeline = StableDiffusionXLPipeline.from_pretrained(source_model_dir, torch_dtype=dtype).to(self.device)
+            pipeline = StableDiffusionXLPipeline.from_pretrained(source_model_dir, torch_dtype=torch_dtype).to(self.device)
             print("[INFO] ONNX Exporter: Pipeline loaded successfully.")
 
             # --- UNet Export ---
             if export_unet:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
-                export(model=pipeline.unet, config=pipeline.unet.config, output=unet_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
+                export(model=pipeline.unet, config=pipeline.unet.config, output=unet_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.unet.config.save_pretrained(unet_path)
                 self.optimize_model(unet_path / "model.onnx", "UNet", optimization_level)
 
@@ -103,13 +103,13 @@ class SDXLDirectoryToOnnx:
             if export_clip:
                 print("\n[INFO] ONNX Exporter: Exporting Text Encoder 1...")
                 text_encoder_path = final_output_dir / "text_encoder"
-                export(model=pipeline.text_encoder, config=pipeline.text_encoder.config, output=text_encoder_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
+                export(model=pipeline.text_encoder, config=pipeline.text_encoder.config, output=text_encoder_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.text_encoder.config.save_pretrained(text_encoder_path)
                 self.optimize_model(text_encoder_path / "model.onnx", "Text Encoder 1", optimization_level)
 
                 print("\n[INFO] ONNX Exporter: Exporting Text Encoder 2...")
                 text_encoder_2_path = final_output_dir / "text_encoder_2"
-                export(model=pipeline.text_encoder_2, config=pipeline.text_encoder_2.config, output=text_encoder_2_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
+                export(model=pipeline.text_encoder_2, config=pipeline.text_encoder_2.config, output=text_encoder_2_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.text_encoder_2.config.save_pretrained(text_encoder_2_path)
                 self.optimize_model(text_encoder_2_path / "model.onnx", "Text Encoder 2", optimization_level)
                 
@@ -124,14 +124,14 @@ class SDXLDirectoryToOnnx:
                 # Export VAE Encoder
                 vae_encoder_path = final_output_dir / "vae_encoder"
                 vae_encoder_config = VaeEncoderOnnxConfig(pipeline.vae.config)
-                export(model=pipeline.vae, config=vae_encoder_config, output=vae_encoder_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
+                export(model=pipeline.vae, config=vae_encoder_config, output=vae_encoder_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.vae.config.save_pretrained(vae_encoder_path)
                 self.optimize_model(vae_encoder_path / "model.onnx", "VAE Encoder", optimization_level)
 
                 # Export VAE Decoder
                 vae_decoder_path = final_output_dir / "vae_decoder"
                 vae_decoder_config = VaeDecoderOnnxConfig(pipeline.vae.config)
-                export(model=pipeline.vae, config=vae_decoder_config, output=vae_decoder_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
+                export(model=pipeline.vae, config=vae_decoder_config, output=vae_decoder_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.vae.config.save_pretrained(vae_decoder_path)
                 self.optimize_model(vae_decoder_path / "model.onnx", "VAE Decoder", optimization_level)
 
