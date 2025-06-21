@@ -606,9 +606,14 @@ class DualCLIPToTensorRT:
             # For CLIP-G, try to disable PyTorch optimizations that might interfere with ONNX export
             if clip_type == 'clip-g':
                 log(f"Disabling PyTorch optimizations for CLIP-G ONNX export...", "DEBUG", True)
-                # Disable optimized attention temporarily
-                original_backends = torch.backends.opt_einsum.enabled
-                torch.backends.opt_einsum.enabled = False
+                # Disable optimized attention temporarily (if available)
+                try:
+                    original_backends = torch.backends.opt_einsum.enabled
+                    torch.backends.opt_einsum.enabled = False
+                    log(f"Disabled opt_einsum backend", "DEBUG", True)
+                except AttributeError:
+                    log(f"opt_einsum backend not available in this PyTorch version", "DEBUG", True)
+                    original_backends = None
                 
                 # Set model to eval mode and disable gradients
                 model.eval()
@@ -731,8 +736,12 @@ class DualCLIPToTensorRT:
         finally:
             # Always clean up ONNX files and restore PyTorch settings
             if clip_type == 'clip-g' and original_backends is not None:
-                log(f"Restoring PyTorch backend settings...", "DEBUG", True)
-                torch.backends.opt_einsum.enabled = original_backends
+                try:
+                    log(f"Restoring PyTorch backend settings...", "DEBUG", True)
+                    torch.backends.opt_einsum.enabled = original_backends
+                    log(f"Restored opt_einsum backend", "DEBUG", True)
+                except AttributeError:
+                    log(f"opt_einsum backend not available for restoration", "DEBUG", True)
             self._cleanup_temporary_files(onnx_path)
 
     def _onnx_to_tensorrt(self, onnx_path, engine_path, clip_type,
