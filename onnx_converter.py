@@ -12,7 +12,7 @@ from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 # The 'convert' module is inside the 'exporters' subdirectory
 from optimum.exporters.onnx.convert import export
 from diffusers import StableDiffusionXLPipeline
-# CORRECTED: Import the specific OnnxConfig classes needed for each component
+# Import the specific OnnxConfig classes needed for each component
 from optimum.exporters.onnx.model_configs import (
     UNetOnnxConfig, 
     CLIPTextOnnxConfig, 
@@ -27,7 +27,8 @@ class SDXLDirectoryToOnnx:
     """
     A ComfyUI node to export a model from a diffusers directory structure into
     separate, optimized ONNX files. This is the robust version that correctly
-    instantiates OnnxConfig objects for the exporter.
+
+    instantiates OnnxConfig objects and handles missing config values.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -101,8 +102,13 @@ class SDXLDirectoryToOnnx:
             if export_unet:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
-                # Instantiate the correct OnnxConfig for the UNet
+                
+                # THE KEY FIX: Manually provide the missing projection_dim to the UNet's ONNX config
                 unet_config = UNetOnnxConfig(pipeline.unet.config)
+                unet_config.values_override = {
+                    "text_encoder_projection_dim": pipeline.text_encoder_2.config.projection_dim,
+                }
+                
                 export(model=pipeline.unet, config=unet_config, output=unet_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.unet.config.save_pretrained(unet_path)
                 self.optimize_model(unet_path / "model.onnx", "UNet", optimization_level)
@@ -111,7 +117,6 @@ class SDXLDirectoryToOnnx:
             if export_clip:
                 print("\n[INFO] ONNX Exporter: Exporting Text Encoder 1...")
                 text_encoder_path = final_output_dir / "text_encoder"
-                # Instantiate the correct OnnxConfig for CLIPTextModel
                 text_encoder_config = CLIPTextOnnxConfig(pipeline.text_encoder.config, library_name="diffusers")
                 export(model=pipeline.text_encoder, config=text_encoder_config, output=text_encoder_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.text_encoder.config.save_pretrained(text_encoder_path)
@@ -119,7 +124,6 @@ class SDXLDirectoryToOnnx:
 
                 print("\n[INFO] ONNX Exporter: Exporting Text Encoder 2...")
                 text_encoder_2_path = final_output_dir / "text_encoder_2"
-                # Instantiate the correct OnnxConfig for CLIPTextModelWithProjection
                 text_encoder_2_config = CLIPTextWithProjectionOnnxConfig(pipeline.text_encoder_2.config, library_name="diffusers")
                 export(model=pipeline.text_encoder_2, config=text_encoder_2_config, output=text_encoder_2_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.text_encoder_2.config.save_pretrained(text_encoder_2_path)
