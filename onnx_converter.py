@@ -13,6 +13,7 @@ from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx.convert import export
 from diffusers import StableDiffusionXLPipeline
 from optimum.exporters.onnx.model_configs import VaeEncoderOnnxConfig, VaeDecoderOnnxConfig
+import transformers
 
 # --- The Main Node Class ---
 
