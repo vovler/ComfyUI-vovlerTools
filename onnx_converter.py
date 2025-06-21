@@ -78,7 +78,7 @@ class SDXLClipToOnnx:
             with tempfile.TemporaryDirectory() as temp_model_dir:
                 # Copy source files to the temporary directory with the standard names that `optimum` expects
                 shutil.copyfile(source_model_path, os.path.join(temp_model_dir, "model.safetensors"))
-                shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "config.json"))
+                shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "model_index.json"))
 
                 print(f"[INFO] comfy_onnx_exporter: Created temporary model structure at {temp_model_dir}")
 
