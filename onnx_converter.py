@@ -116,7 +116,7 @@ class SDXLDirectoryToOnnx:
     def export_from_directory(self, model_directory, output_subfolder_name, optimization_level, use_fp16, 
                               export_unet, export_clip, export_vae, prompt=None, extra_pnginfo=None):
         
-        source_model_dir = os.path.join(folder_paths.get_base_path(), "models", "diffusers", model_directory)
+        source_model_dir = os.path.join(folder_paths.base_path, "models", "diffusers", model_directory)
         if not os.path.isdir(source_model_dir):
             return {"ui": {"text": [f"ERROR: Source directory not found at '{source_model_dir}'."]}}
             
