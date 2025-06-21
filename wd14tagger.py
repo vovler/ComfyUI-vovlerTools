@@ -1,5 +1,3 @@
-# https://huggingface.co/spaces/SmilingWolf/wd-v1-4-tags
-
 import comfy.utils
 import numpy as np
 import csv
@@ -218,7 +216,8 @@ class WD14TaggerAndImageFilterer:
             "blacklist": ("WD14_BLACKLIST",),
             "threshold": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1, "step": 0.05}),
             "resize_method": (["BILINEAR", "LANCZOS", "BICUBIC"], {"default": "BILINEAR"}),
-            "enable_print_image_tags": ("BOOLEAN", {"default": True}),
+            "enable_print_image_tags": ("BOOLEAN", {"default": False}),
+            "bool_bypass_node": ("BOOLEAN", {"default": False}),
         }}
 
     RETURN_TYPES = ("IMAGE",)
@@ -228,7 +227,12 @@ class WD14TaggerAndImageFilterer:
     OUTPUT_NODE = True
     CATEGORY = "vovlerTools"
 
-    def filter_images(self, image, model, csv_data, blacklist, threshold, resize_method="BILINEAR", enable_print_image_tags=True):
+    def filter_images(self, image, model, csv_data, blacklist, threshold, resize_method="BILINEAR", enable_print_image_tags=False, bool_bypass_node=False):
+        # Check if bypass is enabled - return images immediately
+        if bool_bypass_node:
+            log("Node bypass enabled - returning all input images without processing", "INFO", True)
+            return (image,)
+        
         # Use model and tags separately instead of combining them
         tags_list = csv_data
         
