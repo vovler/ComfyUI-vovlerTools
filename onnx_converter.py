@@ -57,12 +57,15 @@ class SDXLClipToOnnx:
              print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find model {clip_filename}. Please ensure it's in a ComfyUI 'clip' model directory.\033[0m")
              return
         
-        # The directory where the source model file and its config.json are located.
         source_model_dir = os.path.dirname(source_model_path)
-        source_config_path = os.path.join(source_model_dir, "config.json")
+        
+        # CORRECTED: Derive the config filename from the model's filename.
+        base_name, _ = os.path.splitext(clip_filename)
+        config_filename = f"{base_name}.json"
+        source_config_path = os.path.join(source_model_dir, config_filename)
 
         if not os.path.exists(source_config_path):
-            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config.json for {clip_filename} in {source_model_dir}. A config.json is required next to the safetensors file.\033[0m")
+            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config file '{config_filename}' for {clip_filename} in {source_model_dir}. A corresponding .json config file is required.\033[0m")
             return
             
         if os.path.exists(final_onnx_path):
@@ -73,25 +76,23 @@ class SDXLClipToOnnx:
         print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {final_onnx_path}")
 
         try:
-            # Create a temporary directory that mimics a standard HuggingFace model repo
             with tempfile.TemporaryDirectory() as temp_model_dir:
-                # Copy the source files to the temporary directory with the names that `optimum` expects
+                # Copy source files to the temporary directory with the standard names that `optimum` expects
                 shutil.copyfile(source_model_path, os.path.join(temp_model_dir, "model.safetensors"))
                 shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "config.json"))
 
-                # This temporary directory now contains `model.safetensors` and `config.json`
                 print(f"[INFO] comfy_onnx_exporter: Created temporary model structure at {temp_model_dir}")
 
                 with tempfile.TemporaryDirectory() as tmpdir_export:
                     print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                     
                     main_export(
-                        model_name_or_path=temp_model_dir, # Point to the temporary directory
+                        model_name_or_path=temp_model_dir,
                         output=tmpdir_export,
                         task="feature-extraction",
                         framework="pt",
                         library_name="transformers",
-                        device=self.device, # Use GPU for export if available
+                        device=self.device,
                         no_post_process=True
                     )
 
