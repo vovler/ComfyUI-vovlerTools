@@ -341,12 +341,11 @@ class DualCLIPToTensorRT:
             clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
             
             
-            clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
-            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
+            clip_l_model = clip_object_1.cond_stage_model.clip_l
+            log(f"Successfully loaded CLIP-L model from {clip_name1}", "DEBUG", True)
 
-            # Extract the actual PyTorch transformer model for CLIP-G. This is the nn.Module we will export.
-            clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
-            log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
+            clip_g_model = clip_object_2.cond_stage_model.clip_g
+            log(f"Successfully loaded CLIP-G model from {clip_name2}", "DEBUG", True)
 
             # Clean up the full clip objects to save memory
             #del clip_object_1, clip_object_2
@@ -362,11 +361,28 @@ class DualCLIPToTensorRT:
             # Create separate engines for each CLIP model
             log("Creating separate TensorRT engines for CLIP-L and CLIP-G", "INFO", True)
             
+            import torch
+            class CLIP_L_Wrapper(torch.nn.Module):
+                def __init__(self, clip_l_model):
+                    super().__init__()
+                    self.clip_l = clip_l_model
+                def forward(self, input_ids):
+                    return self.clip_l(input_ids=input_ids, return_dict=False)[0]
+
+            class CLIP_G_Wrapper(torch.nn.Module):
+                def __init__(self, clip_g_model):
+                    super().__init__()
+                    self.clip_g = clip_g_model
+                def forward(self, input_ids):
+                    outputs = self.clip_g(input_ids=input_ids, return_dict=False)
+                    return outputs[0], outputs[1]
+
+
             # Create CLIP-L engine
             clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
             log(f"Creating CLIP-L engine: {os.path.basename(clip_l_engine_path)}", "INFO")
             self._create_single_clip_engine(
-                clip_l_model, clip_l_engine_path, "clip-l",  # Pass the transformer directly
+                CLIP_L_Wrapper(clip_l_model), clip_l_engine_path, "clip-l",
                 prompt_batch_min, prompt_batch_opt, prompt_batch_max
             )
 
@@ -374,7 +390,7 @@ class DualCLIPToTensorRT:
             clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
             log(f"Creating CLIP-G engine: {os.path.basename(clip_g_engine_path)}", "INFO")
             self._create_single_clip_engine(
-                clip_g_model, clip_g_engine_path, "clip-g", # Pass the transformer directly
+                CLIP_G_Wrapper(clip_g_model), clip_g_engine_path, "clip-g",
                 prompt_batch_min, prompt_batch_opt, prompt_batch_max
             )
             
@@ -557,15 +573,17 @@ class DualCLIPToTensorRT:
                     'last_hidden_state': {0: 'batch_size'},
                     'pooled_output': {0: 'batch_size'}
                 }
+                model_args = (dummy_input,)
             else:  # clip-l
                 output_names = ['last_hidden_state']
                 dynamic_axes_outputs = {
                     'last_hidden_state': {0: 'batch_size'}
                 }
+                model_args = (dummy_input,)
             
             torch.onnx.export(
                 model,
-                (dummy_input,),  # The tuple is important!
+                model_args,
                 onnx_path,
                 export_params=True,
                 opset_version=16,
