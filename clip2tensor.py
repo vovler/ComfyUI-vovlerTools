@@ -1071,7 +1071,9 @@ class TensorRTCLIP:
             
             # Get output shape after setting input shape
             try:
-                output_shape = self.clip_l_context.get_tensor_shape(output_name)
+                output_shape_dims = self.clip_l_context.get_tensor_shape(output_name)
+                # Convert TensorRT Dims to tuple
+                output_shape = tuple(output_shape_dims)
                 log(f"CLIP-L output shape: {output_shape}", "DEBUG", True)
             except:
                 # Fallback to expected shape
@@ -1174,8 +1176,11 @@ class TensorRTCLIP:
             
             # Get output shapes after setting input shape
             try:
-                hidden_shape = self.clip_g_context.get_tensor_shape(hidden_output_name)
-                pooled_shape = self.clip_g_context.get_tensor_shape(pooled_output_name)
+                hidden_shape_dims = self.clip_g_context.get_tensor_shape(hidden_output_name)
+                pooled_shape_dims = self.clip_g_context.get_tensor_shape(pooled_output_name)
+                # Convert TensorRT Dims to tuples
+                hidden_shape = tuple(hidden_shape_dims)
+                pooled_shape = tuple(pooled_shape_dims)
                 log(f"CLIP-G hidden output shape: {hidden_shape}", "DEBUG", True)
                 log(f"CLIP-G pooled output shape: {pooled_shape}", "DEBUG", True)
             except:
