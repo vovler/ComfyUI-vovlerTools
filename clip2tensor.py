@@ -328,16 +328,28 @@ class DualCLIPToTensorRT:
         clip_g_engine_path = None
         
         try:
-            # Load CLIP models using ComfyUI's built-in functionality
-            log("Loading CLIP models from safetensors...", "INFO", True)
+            # === THE FIX: USE COMFYUI'S NATIVE LOADER ===
+            log("Loading CLIP models using ComfyUI's native loader...", "INFO", True)
+
+            # Load the first model, which should contain CLIP-L
+            log(f"Loading CLIP-L from {clip_name1}...", "DEBUG", True)
+            clip_object_1 = comfy.sd.load_clip(ckpt_paths=[clip1_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            # Extract the actual PyTorch model for CLIP-L
+            clip_l_model = clip_object_1.cond_stage_model.clip_l
+            log(f"Successfully loaded CLIP-L from {clip_name1}", "DEBUG", True)
+
+            # Load the second model, which should contain CLIP-G
+            log(f"Loading CLIP-G from {clip_name2}...", "DEBUG", True)
+            clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            # Extract the actual PyTorch model for CLIP-G
+            clip_g_model = clip_object_2.cond_stage_model.clip_g
+            log(f"Successfully loaded CLIP-G from {clip_name2}", "DEBUG", True)
             
-            # Load CLIP-L model (first model)
-            log(f"Loading CLIP-L model: {clip_name1}", "DEBUG", True)
-            clip_l_model = self._load_clip_model(clip1_path, "clip-l")
+            # Clean up the full clip objects to save memory
+            del clip_object_1, clip_object_2
+            model_management.soft_empty_cache()
             
-            # Load CLIP-G model (second model) 
-            log(f"Loading CLIP-G model: {clip_name2}", "DEBUG", True)
-            clip_g_model = self._load_clip_model(clip2_path, "clip-g")
+            # === END OF THE FIX ===
             
             # Create separate engines for each CLIP model
             log("Creating separate TensorRT engines for CLIP-L and CLIP-G", "INFO", True)
@@ -424,96 +436,7 @@ class DualCLIPToTensorRT:
             
             raise
     
-    def _load_clip_model(self, model_path, clip_type):
-        """
-        Load actual CLIP text encoder from safetensors file
-        Returns the real PyTorch CLIP model ready for ONNX export
-        """
-        try:
-            log(f"Loading {clip_type} model from {os.path.basename(model_path)}", "DEBUG", True)
-            
-            # Load using ComfyUI's CLIP loading system
-            import comfy.sd
-            import comfy.model_management as model_management
-            
-            # Load CLIP using ComfyUI's checkpoint loader
-            log(f"Loading CLIP checkpoint: {model_path}", "DEBUG", True)
-            
-            # Try multiple methods to load the CLIP model
-            model = None
-            
-            # Method 1: Direct safetensors loading
-            try:
-                from safetensors.torch import load_file
-                state_dict = load_file(model_path)
-                
-                # Look for text encoder keys
-                text_encoder_keys = [k for k in state_dict.keys() if any(x in k for x in ['text_model', 'transformer', 'encoder'])]
-                log(f"Found {len(text_encoder_keys)} text encoder keys", "DEBUG", True)
-                
-                if text_encoder_keys:
-                    # Try to extract just the text encoder part
-                    if any('text_model' in k for k in text_encoder_keys):
-                        # This looks like a CLIP text encoder
-                        log(f"Detected CLIP text encoder in {clip_type}", "DEBUG", True)
-                        
-                        # Import CLIP model classes
-                        from transformers import CLIPTextModel, CLIPTextConfig
-                        
-                        # Create appropriate config based on clip_type
-                        if clip_type == "clip-l":
-                            config = CLIPTextConfig(
-                                vocab_size=49408,
-                                hidden_size=768,
-                                intermediate_size=3072,
-                                num_hidden_layers=12,
-                                num_attention_heads=12,
-                                max_position_embeddings=77
-                            )
-                        else:  # clip-g
-                            config = CLIPTextConfig(
-                                vocab_size=49408,
-                                hidden_size=1280,
-                                intermediate_size=5120,
-                                num_hidden_layers=32,
-                                num_attention_heads=20,
-                                max_position_embeddings=77
-                            )
-                        
-                        # Create model and load weights
-                        model = CLIPTextModel(config)
-                        
-                        # Try to load compatible weights
-                        try:
-                            # Filter state dict for text model keys
-                            text_state_dict = {}
-                            for k, v in state_dict.items():
-                                if 'text_model' in k:
-                                    # Remove 'text_model.' prefix if present
-                                    new_key = k.replace('text_model.', '')
-                                    text_state_dict[new_key] = v
-                            
-                            if text_state_dict:
-                                model.load_state_dict(text_state_dict, strict=False)
-                                log(f"Loaded {clip_type} weights from safetensors", "DEBUG", True)
-                            else:
-                                log(f"No compatible weights found for {clip_type}, using random initialization", "WARNING", True)
-                        except Exception as weight_error:
-                            log(f"Weight loading failed for {clip_type}: {str(weight_error)}", "WARNING", True)
-                            log("Using randomly initialized model", "WARNING", True)
-                        
-                        model.eval()
-                        return model
-                        
-            except Exception as safetensors_error:
-                log(f"Safetensors loading failed: {str(safetensors_error)}", "DEBUG", True)
-            
-            # If safetensors loading fails, raise error - no fallbacks
-            raise RuntimeError(f"Failed to load {clip_type} model from safetensors: {str(safetensors_error)}")
-            
-        except Exception as e:
-            log_error_with_traceback(f"Failed to load {clip_type} model", e)
-            raise
+
     
 
     
@@ -536,18 +459,33 @@ class DualCLIPToTensorRT:
             
             # Single ONNX export attempt - no fallbacks
             log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
+            
+            # Define the output names based on the clip type
+            if clip_type == 'clip-g':
+                # CLIP-G needs both outputs for SDXL
+                output_names = ['last_hidden_state', 'pooled_output']
+                dynamic_axes_outputs = {
+                    'last_hidden_state': {0: 'batch_size'},
+                    'pooled_output': {0: 'batch_size'}
+                }
+            else:  # clip-l
+                output_names = ['last_hidden_state']
+                dynamic_axes_outputs = {
+                    'last_hidden_state': {0: 'batch_size'}
+                }
+            
             torch.onnx.export(
                 model,
-                dummy_input,
+                (dummy_input,),  # The tuple is important!
                 onnx_path,
                 export_params=True,
                 opset_version=16,
                 do_constant_folding=True,
                 input_names=['input_ids'],
-                output_names=['text_embeddings'],
+                output_names=output_names,
                 dynamic_axes={
                     'input_ids': {0: 'batch_size'},
-                    'text_embeddings': {0: 'batch_size'}
+                    **dynamic_axes_outputs  # Merge the output axes
                 }
             )
             
@@ -650,7 +588,7 @@ class DualCLIPToTensorRT:
             # Clean up main ONNX file
             if onnx_path and os.path.exists(onnx_path):
                 os.remove(onnx_path)
-                log(f"Cleaned up temporary ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
+                #log(f"Cleaned up temporary ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
             
             # Clean up any leftover temporary files
             import glob
