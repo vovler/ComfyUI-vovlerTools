@@ -3,124 +3,164 @@ import folder_paths
 import tempfile
 import shutil
 import traceback
+
 # Required imports
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx import main_export
 
 
-class SDXLClipToOnnx:
+# --- Helper function for exporting components ---
+def export_component(component_name, source_path, final_output_dir, optimization_level, use_fp16, device="cpu", gpu_available=False):
     """
-    A ComfyUI node to export SDXL CLIP-L and CLIP-G models to ONNX format.
-    This version loads the models directly from .safetensors files provided by the user
-    and saves them as single .onnx files in the /models/clip/ directory.
+    Handles the export and optimization of a single model component.
+    """
+    print(f"\n[INFO] ONNX Exporter: Starting export for component: {component_name.upper()}")
+    
+    # The final location for this specific component (e.g., /output/onnx_models/unet)
+    final_component_path = os.path.join(final_output_dir, component_name)
+    if os.path.exists(final_component_path):
+        print(f"[INFO] ONNX Exporter: Output directory '{final_component_path}' already exists. Skipping component.")
+        return True
+
+    # Mapping from our component names to optimum's task names
+    task_map = {
+        "unet": "diffusion",
+        "text_encoder": "feature-extraction",
+        "text_encoder_2": "feature-extraction",
+        "vae": "vision2seq-lm", # VAE is exported as a single task
+    }
+    task = task_map.get(component_name)
+    
+    if not task:
+        print(f"\033[91m[ERROR] ONNX Exporter: Unknown component '{component_name}'. Cannot determine export task.\033[0m")
+        return False
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir_export:
+            print(f"[INFO] ONNX Exporter: Exporting {component_name} to temporary ONNX format...")
+            
+            main_export(
+                model_name_or_path=source_path,
+                output=tmpdir_export,
+                task=task,
+                framework="pt",
+                device=device,
+                fp16=use_fp16, # Apply fp16 during export if requested
+                no_post_process=True # We will do our own optimization
+            )
+
+            optimizer = ORTOptimizer.from_pretrained(tmpdir_export)
+            # Level 2 (all basic and extended optimizations) is usually a good balance.
+            optimization_config = OptimizationConfig(
+                optimization_level=optimization_level,
+                fp16=False # Let the main export handle FP16 conversion for better consistency.
+            )
+            
+            device_used = "GPU" if gpu_available else "CPU"
+            print(f"[INFO] ONNX Exporter: Optimizing {component_name} on {device_used} (Level: {optimization_level})...")
+            
+            optimizer.optimize(save_dir=final_component_path, optimization_config=optimization_config)
+
+            print(f"\033[92m[SUCCESS] ONNX Exporter: Successfully exported and optimized {component_name} to:\n{final_component_path}\033[0m")
+            return True
+
+    except Exception as e:
+        print(f"\033[91m[ERROR] ONNX Exporter: An error occurred during ONNX export for {component_name}: {e}\033[0m")
+        traceback.print_exc()
+        return False
+
+
+# --- Node: Export from a Diffusers Directory ---
+
+class SDXLDirectoryToOnnx:
+    """
+    A ComfyUI node to load a model from a diffusers directory structure
+    and export its components into separate ONNX files.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
 
     @classmethod
     def INPUT_TYPES(cls):
-        clip_files = folder_paths.get_filename_list("clip")
+        # Create the path for diffusers models if it doesn't exist
+        diffusers_path = os.path.join(folder_paths.get_base_path(), "models", "diffusers")
+        os.makedirs(diffusers_path, exist_ok=True)
+        
+        # Get a list of directories inside the diffusers model path
+        model_dirs = [d for d in os.listdir(diffusers_path) if os.path.isdir(os.path.join(diffusers_path, d))]
+        
         return {
             "required": {
-                "clip_l_name": (clip_files, ),
-                "clip_g_name": (clip_files, ),
-                "optimization_level": ("INT", {"default": 4, "min": 0, "max": 4, "step": 1, "display": "slider"}),
+                "model_directory": (model_dirs,),
+                "output_subfolder_name": ("STRING", {"default": "onnx_from_dir"}),
+                "optimization_level": ("INT", {"default": 2, "min": 0, "max": 4, "step": 1, "display": "slider"}),
                 "use_fp16": ("BOOLEAN", {"default": True}),
+                "export_unet": ("BOOLEAN", {"default": True}),
+                "export_clip": ("BOOLEAN", {"default": True}),
+                "export_vae": ("BOOLEAN", {"default": True}),
             },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     RETURN_TYPES = ()
-    FUNCTION = "export_clips_to_onnx"
+    FUNCTION = "export_from_directory"
 
     def __init__(self):
-        self.gpu_available = False
-        self.device = "cpu"
-        providers = onnxruntime.get_available_providers()
-        if 'CUDAExecutionProvider' in providers:
-            self.gpu_available = True
-            self.device = "cuda"
-            print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
+        self.gpu_available = 'CUDAExecutionProvider' in onnxruntime.get_available_providers()
+        self.device = "cuda" if self.gpu_available else "cpu"
+        if self.gpu_available:
+            print("\033[92m[INFO] ONNX Exporter: CUDAExecutionProvider found. GPU will be used for export/optimization.\033[0m")
         else:
-            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
+            print("\033[93m[WARNING] ONNX Exporter: CUDAExecutionProvider not found. Export/optimization will run on CPU.\033[0m")
 
-    def export_single_clip(self, clip_filename, model_key, output_dir, optimization_level, use_fp16):
-        """
-        Handles the conversion of a single CLIP model file and saves it as a single .onnx file.
-        """
-        final_onnx_path = os.path.join(output_dir, f"{model_key}.onnx")
+    def export_from_directory(self, model_directory, output_subfolder_name, optimization_level, use_fp16, 
+                              export_unet, export_clip, export_vae, prompt=None, extra_pnginfo=None):
         
-        source_model_path = folder_paths.get_full_path("clip", clip_filename)
-        if not source_model_path:
-             print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find model {clip_filename}. Please ensure it's in a ComfyUI 'clip' model directory.\033[0m")
-             return
-        
-        source_model_dir = os.path.dirname(source_model_path)
-        
-        # CORRECTED: Derive the config filename from the model's filename.
-        base_name, _ = os.path.splitext(clip_filename)
-        config_filename = f"{base_name}.json"
-        source_config_path = os.path.join(source_model_dir, config_filename)
-
-        if not os.path.exists(source_config_path):
-            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find config file '{config_filename}' for {clip_filename} in {source_model_dir}. A corresponding .json config file is required.\033[0m")
-            return
+        source_model_dir = os.path.join(folder_paths.get_base_path(), "models", "diffusers", model_directory)
+        if not os.path.isdir(source_model_dir):
+            return {"ui": {"text": [f"ERROR: Source directory not found at '{source_model_dir}'."]}}
             
-        if os.path.exists(final_onnx_path):
-            print(f"[INFO] comfy_onnx_exporter: ONNX model already exists at {final_onnx_path}. Skipping.")
-            return
-
-        print(f"\n[INFO] comfy_onnx_exporter: Starting export for {model_key} from {clip_filename}")
-        print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {final_onnx_path}")
+        final_output_dir = os.path.join(folder_paths.get_output_directory(), output_subfolder_name)
+        os.makedirs(final_output_dir, exist_ok=True)
+        print(f"[INFO] ONNX Exporter: Source model directory: {source_model_dir}")
+        print(f"[INFO] ONNX Exporter: Final models will be saved in: {final_output_dir}")
 
         try:
-            with tempfile.TemporaryDirectory() as temp_model_dir:
-                # Copy source files to the temporary directory with the standard names that `optimum` expects
-                shutil.copyfile(source_model_path, os.path.join(temp_model_dir, "model.safetensors"))
-                shutil.copyfile(source_config_path, os.path.join(temp_model_dir, "model_index.json"))
+            # Determine which components to process based on user selection
+            components_to_export = []
+            if export_unet: components_to_export.append("unet")
+            if export_clip: components_to_export.extend(["text_encoder", "text_encoder_2"])
+            if export_vae: components_to_export.append("vae")
 
-                print(f"[INFO] comfy_onnx_exporter: Created temporary model structure at {temp_model_dir}")
+            for component in components_to_export:
+                component_source_path = os.path.join(source_model_dir, component)
+                if not os.path.isdir(component_source_path):
+                    print(f"\033[93m[WARNING] ONNX Exporter: Component directory '{component}' not found in source. Skipping.\033[0m")
+                    continue
+                
+                export_component(
+                    component,
+                    component_source_path,
+                    final_output_dir,
+                    optimization_level, use_fp16, self.device, self.gpu_available
+                )
+            
+            # Copy non-ONNX files like tokenizers if CLIP export was requested
+            if export_clip:
+                print("[INFO] ONNX Exporter: Copying tokenizer files...")
+                tokenizer_src = os.path.join(source_model_dir, "tokenizer")
+                tokenizer_2_src = os.path.join(source_model_dir, "tokenizer_2")
 
-                with tempfile.TemporaryDirectory() as tmpdir_export:
-                    print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
-                    
-                    main_export(
-                        model_name_or_path=temp_model_dir,
-                        output=tmpdir_export,
-                        task="feature-extraction",
-                        framework="pt",
-                        library_name="diffusers",
-                        device=self.device,
-                        no_post_process=True
-                    )
-
-                    optimizer = ORTOptimizer.from_pretrained(tmpdir_export)
-                    optimization_config = OptimizationConfig(
-                        optimization_level=optimization_level,
-                        fp16=use_fp16
-                    )
-                    
-                    with tempfile.TemporaryDirectory() as tmpdir_optimized:
-                        device_used = "GPU" if self.gpu_available else "CPU"
-                        print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
-                        
-                        optimizer.optimize(save_dir=tmpdir_optimized, optimization_config=optimization_config)
-
-                        optimized_model_file = os.path.join(tmpdir_optimized, 'model.onnx')
-                        shutil.move(optimized_model_file, final_onnx_path)
-
-                        print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_key} to:\n{final_onnx_path}\033[0m")
+                if os.path.isdir(tokenizer_src):
+                    shutil.copytree(tokenizer_src, os.path.join(final_output_dir, "tokenizer"), dirs_exist_ok=True)
+                if os.path.isdir(tokenizer_2_src):
+                    shutil.copytree(tokenizer_2_src, os.path.join(final_output_dir, "tokenizer_2"), dirs_exist_ok=True)
+                
+                print(f"\033[92m[SUCCESS] ONNX Exporter: Copied tokenizers to {final_output_dir}\033[0m")
 
         except Exception as e:
-            print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_key}: {e}\033[0m")
             traceback.print_exc()
+            return {"ui": {"text": [f"An unexpected error occurred: {e}"]}}
 
-    def export_clips_to_onnx(self, clip_l_name, clip_g_name, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
-        output_clip_dir = os.path.join(folder_paths.base_path, "models", "clip")
-        os.makedirs(output_clip_dir, exist_ok=True)
-        
-        self.export_single_clip(clip_l_name, "clip_l", output_clip_dir, optimization_level, use_fp16)
-        self.export_single_clip(clip_g_name, "clip_g", output_clip_dir, optimization_level, use_fp16)
-        
-        return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{output_clip_dir}"]}}
+        return {"ui": {"text": [f"ONNX export process finished.\nModels saved in:\n{final_output_dir}"]}}
