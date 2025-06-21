@@ -336,6 +336,21 @@ class DualCLIPToTensorRT:
             
             log("Successfully located both CLIP-L and CLIP-G models", "INFO", True)
 
+            # Debug the actual model classes and structures before moving to GPU
+            log("=== DEBUGGING CLIP MODEL CLASSES ===", "DEBUG", True)
+            log(f"CLIP-L model class: {type(clip_l_model)}", "DEBUG", True)
+            log(f"CLIP-G model class: {type(clip_g_model)}", "DEBUG", True)
+            
+            # Check if they have different parent models
+            log(f"CLIP-L parent object: {type(clip_object_1.cond_stage_model.clip_l) if hasattr(clip_object_1.cond_stage_model, 'clip_l') else 'None'}", "DEBUG", True)
+            log(f"CLIP-G parent object: {type(clip_object_2.cond_stage_model.clip_g) if hasattr(clip_object_2.cond_stage_model, 'clip_g') else 'None'}", "DEBUG", True)
+            
+            # Check the config/architecture differences
+            if hasattr(clip_l_model, 'config'):
+                log(f"CLIP-L config: {clip_l_model.config}", "DEBUG", True)
+            if hasattr(clip_g_model, 'config'):
+                log(f"CLIP-G config: {clip_g_model.config}", "DEBUG", True)
+
             # Move models to GPU for conversion
             device = 'cuda'
             log(f"Moving models to '{device}' for ONNX export...", "INFO", True)
@@ -372,10 +387,36 @@ class DualCLIPToTensorRT:
                 def forward(self, input_ids):
                     # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
                     # For CLIP-G we need both sequence output and projected pooled output
-                    outputs = self.clip_g(input_tokens=input_ids)
-                    last_hidden_state = outputs[0]  # sequence output
-                    projected_pooled = outputs[2]   # projected pooled output (for CLIPTextModelWithProjection)
-                    return last_hidden_state, projected_pooled
+                    print(f"[CLIP_G_Wrapper] Forward called with input_ids shape: {input_ids.shape}")
+                    print(f"[CLIP_G_Wrapper] Input device: {input_ids.device}, dtype: {input_ids.dtype}")
+                    print(f"[CLIP_G_Wrapper] Input min/max: {input_ids.min()}/{input_ids.max()}")
+                    
+                    try:
+                        outputs = self.clip_g(input_tokens=input_ids)
+                        print(f"[CLIP_G_Wrapper] Raw CLIP-G outputs: {len(outputs)} items")
+                        for i, output in enumerate(outputs):
+                            if output is not None:
+                                print(f"[CLIP_G_Wrapper] Raw output[{i}]: shape={output.shape}, dtype={output.dtype}, device={output.device}")
+                            else:
+                                print(f"[CLIP_G_Wrapper] Raw output[{i}]: None")
+                        
+                        last_hidden_state = outputs[0]  # sequence output
+                        projected_pooled = outputs[2]   # projected pooled output (for CLIPTextModelWithProjection)
+                        
+                        print(f"[CLIP_G_Wrapper] Selected last_hidden_state: shape={last_hidden_state.shape}, dtype={last_hidden_state.dtype}")
+                        print(f"[CLIP_G_Wrapper] Selected projected_pooled: shape={projected_pooled.shape}, dtype={projected_pooled.dtype}")
+                        
+                        result = (last_hidden_state, projected_pooled)
+                        print(f"[CLIP_G_Wrapper] Returning tuple with {len(result)} items")
+                        return result
+                        
+                    except Exception as e:
+                        print(f"[CLIP_G_Wrapper] ERROR in forward pass: {str(e)}")
+                        print(f"[CLIP_G_Wrapper] Error type: {type(e)}")
+                        import traceback
+                        print(f"[CLIP_G_Wrapper] Traceback:")
+                        traceback.print_exc()
+                        raise
 
             # Test the models first to debug the outputs
             log("Testing CLIP model outputs for debugging...", "DEBUG", True)
@@ -402,6 +443,28 @@ class DualCLIPToTensorRT:
                         log(f"CLIP-G output[{i}]: None", "DEBUG", True)
             except Exception as e:
                 log(f"CLIP-G test failed: {str(e)}", "ERROR", True)
+            
+            # Test the wrappers before ONNX export
+            log("Testing wrapper outputs...", "DEBUG", True)
+            clip_l_wrapper = CLIP_L_Wrapper(clip_l_model)
+            clip_g_wrapper = CLIP_G_Wrapper(clip_g_model)
+            
+            try:
+                clip_l_wrapper_out = clip_l_wrapper(test_input)
+                log(f"CLIP-L wrapper output shape: {clip_l_wrapper_out.shape}", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-L wrapper test failed: {str(e)}", "ERROR", True)
+            
+            try:
+                clip_g_wrapper_out = clip_g_wrapper(test_input)
+                log(f"CLIP-G wrapper outputs: {len(clip_g_wrapper_out) if isinstance(clip_g_wrapper_out, (tuple, list)) else 'single'}", "DEBUG", True)
+                if isinstance(clip_g_wrapper_out, (tuple, list)):
+                    for i, out in enumerate(clip_g_wrapper_out):
+                        log(f"CLIP-G wrapper output[{i}] shape: {out.shape}", "DEBUG", True)
+                else:
+                    log(f"CLIP-G wrapper output shape: {clip_g_wrapper_out.shape}", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-G wrapper test failed: {str(e)}", "ERROR", True)
             
             # Create CLIP-L engine
             clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
@@ -526,20 +589,49 @@ class DualCLIPToTensorRT:
                 }
                 model_args = (dummy_input,)
             
-            torch.onnx.export(
-                model,
-                model_args,
-                onnx_path,
-                export_params=True,
-                opset_version=16,
-                do_constant_folding=True,
-                input_names=['input_ids'],
-                output_names=output_names,
-                dynamic_axes={
-                    'input_ids': {0: 'batch_size'},
-                    **dynamic_axes_outputs  # Merge the output axes
-                }
-            )
+            log(f"ONNX export config for {clip_type}:", "DEBUG", True)
+            log(f"  - Model args: {[arg.shape for arg in model_args]}", "DEBUG", True)
+            log(f"  - Output names: {output_names}", "DEBUG", True)
+            log(f"  - Dynamic axes: {{'input_ids': {{0: 'batch_size'}}, **{dynamic_axes_outputs}}}", "DEBUG", True)
+            
+            # Test the model wrapper first
+            log(f"Testing {clip_type} wrapper before ONNX export...", "DEBUG", True)
+            try:
+                wrapper_output = model(dummy_input)
+                if isinstance(wrapper_output, (tuple, list)):
+                    log(f"{clip_type} wrapper returned {len(wrapper_output)} outputs", "DEBUG", True)
+                    for i, out in enumerate(wrapper_output):
+                        log(f"  - Output {i}: {out.shape} dtype={out.dtype}", "DEBUG", True)
+                else:
+                    log(f"{clip_type} wrapper returned single output: {wrapper_output.shape} dtype={wrapper_output.dtype}", "DEBUG", True)
+            except Exception as e:
+                log(f"ERROR: {clip_type} wrapper test failed: {str(e)}", "ERROR", True)
+                raise RuntimeError(f"Wrapper test failed for {clip_type}: {str(e)}")
+            
+            try:
+                torch.onnx.export(
+                    model,
+                    model_args,
+                    onnx_path,
+                    export_params=True,
+                    opset_version=16,
+                    do_constant_folding=True,
+                    input_names=['input_ids'],
+                    output_names=output_names,
+                    dynamic_axes={
+                        'input_ids': {0: 'batch_size'},
+                        **dynamic_axes_outputs  # Merge the output axes
+                    }
+                )
+            except Exception as onnx_error:
+                log(f"ONNX export failed for {clip_type}: {str(onnx_error)}", "ERROR", True)
+                log(f"ONNX error type: {type(onnx_error)}", "ERROR", True)
+                import traceback
+                log(f"ONNX export traceback:", "ERROR", True)
+                for line in traceback.format_exc().split('\n'):
+                    if line.strip():
+                        log(f"  {line}", "ERROR", True)
+                raise
             
             log(f"{clip_type} ONNX export completed", "DEBUG", True)
 
