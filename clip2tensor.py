@@ -393,15 +393,15 @@ class DualCLIPToTensorRT:
                 def forward(self, input_ids):
                     # Raw CLIPTextModel returns (x[0], x[1], out, x[2]) where:
                     # x[0] = last hidden state, x[1] = intermediate, out = projected, x[2] = pooled
-                    # For CLIP-G we need to mimic SDXLClipG behavior (penultimate layer + projection)
+                    # For ONNX export compatibility, use final layer instead of intermediate_output=-2
                     print(f"[CLIP_G_Wrapper] Forward called with input_ids shape: {input_ids.shape}")
                     print(f"[CLIP_G_Wrapper] Input device: {input_ids.device}, dtype: {input_ids.dtype}")
                     print(f"[CLIP_G_Wrapper] Input min/max: {input_ids.min()}/{input_ids.max()}")
                     
                     try:
-                        # Call the raw transformer with intermediate_output to get penultimate layer
-                        # SDXLClipG uses layer_idx=-2 (penultimate layer)
-                        outputs = self.clip_g(input_tokens=input_ids, intermediate_output=-2, final_layer_norm_intermediate=False)
+                        # Use final layer output to avoid ONNX negative indexing issues
+                        # Note: This differs from SDXLClipG's penultimate layer, but needed for ONNX compatibility
+                        outputs = self.clip_g(input_tokens=input_ids)
                         print(f"[CLIP_G_Wrapper] Raw CLIP-G outputs: {len(outputs)} items")
                         for i, output in enumerate(outputs):
                             if output is not None:
@@ -409,19 +409,10 @@ class DualCLIPToTensorRT:
                             else:
                                 print(f"[CLIP_G_Wrapper] Raw output[{i}]: None")
                         
-                        # For SDXLClipG behavior, we want:
-                        # - intermediate output (penultimate layer) as sequence
-                        # - projected pooled output  
-                        if len(outputs) >= 3 and outputs[1] is not None:
-                            # Use intermediate output (penultimate layer) as sequence
-                            last_hidden_state = outputs[1]  # intermediate output from layer -2
-                            projected_pooled = outputs[2]   # projected pooled output
-                            print(f"[CLIP_G_Wrapper] Using intermediate (penultimate) layer as sequence")
-                        else:
-                            # Fallback to final layer if intermediate not available
-                            last_hidden_state = outputs[0]  # final layer
-                            projected_pooled = outputs[2]   # projected pooled output
-                            print(f"[CLIP_G_Wrapper] Using final layer as sequence (fallback)")
+                        # Use final layer output for ONNX compatibility
+                        last_hidden_state = outputs[0]  # final layer sequence output
+                        projected_pooled = outputs[2]   # projected pooled output
+                        print(f"[CLIP_G_Wrapper] Using final layer for ONNX compatibility")
                         
                         print(f"[CLIP_G_Wrapper] Selected last_hidden_state: shape={last_hidden_state.shape}, dtype={last_hidden_state.dtype}")
                         print(f"[CLIP_G_Wrapper] Selected projected_pooled: shape={projected_pooled.shape}, dtype={projected_pooled.dtype}")
