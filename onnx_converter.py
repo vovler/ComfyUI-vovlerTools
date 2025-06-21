@@ -4,17 +4,10 @@ import folder_paths
 import tempfile
 import shutil
 
-# Check for optimum and onnxruntime
-try:
-    # We specifically import onnxruntime here to check for GPU providers
-    import onnxruntime
-    from optimum.onnxruntime import ORTModelForFeatureExtraction, OptimizationConfig
-    from optimum.onnxruntime.optimizer import ORTOptimizer
-    from optimum.exporters.onnx import export
-    IMPORT_SUCCESS = True
-except ImportError:
-    IMPORT_SUCCESS = False
-    print("\033[91m[ERROR] comfy_onnx_exporter: `optimum` or `onnxruntime` not installed. Please run `pip install optimum[onnxruntime-gpu]` for the best performance.\033[0m")
+import onnxruntime
+from optimum.onnxruntime import ORTModelForFeatureExtraction, OptimizationConfig
+from optimum.onnxruntime.optimizer import ORTOptimizer
+from optimum.exporters.onnx import export
 
 class SDXLClipToOnnx:
     """
@@ -41,23 +34,21 @@ class SDXLClipToOnnx:
     
     def __init__(self):
         self.gpu_available = False
-        if IMPORT_SUCCESS:
-            # NEW: Check for CUDA provider once upon initialization
-            providers = onnxruntime.get_available_providers()
-            if 'CUDAExecutionProvider' in providers:
-                self.gpu_available = True
-                print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
-            else:
-                print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\nFor a significant speed-up on NVIDIA GPUs, please install the GPU version:\n    pip install optimum[onnxruntime-gpu]\033[0m")
+       
+        # NEW: Check for CUDA provider once upon initialization
+        providers = onnxruntime.get_available_providers()
+        if 'CUDAExecutionProvider' in providers:
+            self.gpu_available = True
+            print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
+        else:
+            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\nFor a significant speed-up on NVIDIA GPUs, please install the GPU version:\n    pip install optimum[onnxruntime-gpu]\033[0m")
 
 
     def export_single_clip(self, clip_model, model_name_hint, optimization_level, use_fp16):
         """
         Handles the conversion and saving of a single CLIP model.
         """
-        if not IMPORT_SUCCESS:
-            print("[ERROR] comfy_onnx_exporter: Aborting due to missing libraries.")
-            return
+
 
         if not hasattr(clip_model, 'current_filename') or not clip_model.current_filename:
             print(f"[ERROR] comfy_onnx_exporter: Could not find source filename for {model_name_hint}. Cannot determine save location.")

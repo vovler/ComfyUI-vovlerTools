@@ -1,7 +1,5 @@
 tensorrt>=10.0.1
 onnx!=1.16.2
-
-# Additional dependencies for V2 (Optimum-based) converter
 optimum[onnxruntime-gpu]>=1.16.0
 transformers>=4.35.0
 onnxruntime-gpu>=1.16.0
