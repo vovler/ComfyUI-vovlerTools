@@ -360,17 +360,49 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_l = clip_l_model
                 def forward(self, input_ids):
-                    return self.clip_l(input_tokens=input_ids)[0]
+                    # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
+                    # For CLIP-L we only need the sequence output (last hidden state)
+                    outputs = self.clip_l(input_tokens=input_ids)
+                    return outputs[0]  # last_hidden_state
 
             class CLIP_G_Wrapper(torch.nn.Module):
                 def __init__(self, clip_g_model):
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
+                    # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
+                    # For CLIP-G we need both sequence output and projected pooled output
                     outputs = self.clip_g(input_tokens=input_ids)
-                    return outputs[0], outputs[2]
+                    last_hidden_state = outputs[0]  # sequence output
+                    projected_pooled = outputs[2]   # projected pooled output (for CLIPTextModelWithProjection)
+                    return last_hidden_state, projected_pooled
 
-
+            # Test the models first to debug the outputs
+            log("Testing CLIP model outputs for debugging...", "DEBUG", True)
+            test_input = torch.randint(0, 49408, (1, 77), dtype=torch.long, device=device)
+            
+            try:
+                clip_l_outputs = clip_l_model(input_tokens=test_input)
+                log(f"CLIP-L raw outputs: {len(clip_l_outputs)} items", "DEBUG", True)
+                for i, output in enumerate(clip_l_outputs):
+                    if output is not None:
+                        log(f"CLIP-L output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
+                    else:
+                        log(f"CLIP-L output[{i}]: None", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-L test failed: {str(e)}", "ERROR", True)
+            
+            try:
+                clip_g_outputs = clip_g_model(input_tokens=test_input)
+                log(f"CLIP-G raw outputs: {len(clip_g_outputs)} items", "DEBUG", True)
+                for i, output in enumerate(clip_g_outputs):
+                    if output is not None:
+                        log(f"CLIP-G output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
+                    else:
+                        log(f"CLIP-G output[{i}]: None", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-G test failed: {str(e)}", "ERROR", True)
+            
             # Create CLIP-L engine
             clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
             log(f"Creating CLIP-L engine: {os.path.basename(clip_l_engine_path)}", "INFO")
