@@ -328,7 +328,7 @@ class DualCLIPToTensorRT:
         clip_g_engine_path = None
         
         try:
-            # === THE FIX: USE COMFYUI'S NATIVE LOADER ===
+            # === THE FIX: USE COMFYUI'S NATIVE LOADER AND GET THE TRANSFORMER ===
             log("Loading CLIP models using ComfyUI's native loader...", "INFO", True)
 
             # Load the first model, which should contain CLIP-L
@@ -344,14 +344,9 @@ class DualCLIPToTensorRT:
             clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
             log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
 
-            clip_g_model = clip_object_2.cond_stage_model.clip_g
-            log(f"Successfully loaded CLIP-G model from {clip_name2}", "DEBUG", True)
+            clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
+            log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
 
-            # Clean up the full clip objects to save memory
-            #del clip_object_1, clip_object_2
-            #model_management.soft_empty_cache()
-
-            
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
             model_management.soft_empty_cache()
@@ -374,8 +369,8 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
-                    outputs = self.clip_g(input_ids=input_ids)
-                    return outputs[0], outputs[1]
+                    outputs = self.clip_g(input_tokens=input_ids)
+                    return outputs[0], outputs[2]
 
 
             # Create CLIP-L engine
