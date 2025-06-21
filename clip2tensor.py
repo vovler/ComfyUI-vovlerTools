@@ -334,16 +334,20 @@ class DualCLIPToTensorRT:
             # Load the first model, which should contain CLIP-L
             log(f"Loading CLIP-L from {clip_name1}...", "DEBUG", True)
             clip_object_1 = comfy.sd.load_clip(ckpt_paths=[clip1_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
-            # Extract the actual PyTorch model for CLIP-L
-            clip_l_model = clip_object_1.cond_stage_model.clip_l
-            log(f"Successfully loaded CLIP-L from {clip_name1}", "DEBUG", True)
+            # Extract the actual PyTorch transformer model for CLIP-L, bypassing ComfyUI's token processing
+            clip_l_transformer = clip_object_1.cond_stage_model.clip_l.transformer
+            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
 
             # Load the second model, which should contain CLIP-G
             log(f"Loading CLIP-G from {clip_name2}...", "DEBUG", True)
             clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
-            # Extract the actual PyTorch model for CLIP-G
-            clip_g_model = clip_object_2.cond_stage_model.clip_g
-            log(f"Successfully loaded CLIP-G from {clip_name2}", "DEBUG", True)
+            # Extract the actual PyTorch transformer model for CLIP-G, bypassing ComfyUI's token processing
+            clip_g_transformer = clip_object_2.cond_stage_model.clip_g.transformer
+            log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
+            
+            # Create ONNX-exportable wrappers around the transformers
+            clip_l_model = self._create_clip_wrapper(clip_l_transformer, "clip-l")
+            clip_g_model = self._create_clip_wrapper(clip_g_transformer, "clip-g")
             
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
@@ -434,11 +438,92 @@ class DualCLIPToTensorRT:
             elif "onnx" in error_str:
                 log("Suggestion: ONNX export or parsing failed - check model compatibility", "INFO", True)
             
-            raise
-    
+                        raise
 
-    
-
+    def _create_clip_wrapper(self, transformer, clip_type):
+        """Create an ONNX-exportable wrapper around ComfyUI's CLIP transformer"""
+        import torch
+        import torch.nn as nn
+        
+        class CLIPWrapper(nn.Module):
+            def __init__(self, transformer, clip_type):
+                super().__init__()
+                self.transformer = transformer
+                self.clip_type = clip_type
+                
+                # Get the token embedding and positional embedding from the transformer
+                if hasattr(transformer, 'embeddings'):
+                    # Standard CLIP structure
+                    self.token_embedding = transformer.embeddings.token_embedding
+                    self.positional_embedding = transformer.embeddings.position_embedding.weight
+                elif hasattr(transformer, 'token_embedding'):
+                    # Direct access
+                    self.token_embedding = transformer.token_embedding
+                    self.positional_embedding = transformer.positional_embedding
+                else:
+                    # Try to find embeddings in the model
+                    for name, module in transformer.named_modules():
+                        if 'token_embedding' in name or 'word_embeddings' in name:
+                            self.token_embedding = module
+                            break
+                    
+                    # Get positional embeddings
+                    if hasattr(transformer, 'positional_embedding'):
+                        self.positional_embedding = transformer.positional_embedding
+                    else:
+                        # Create dummy positional embeddings
+                        embed_dim = 768 if clip_type == 'clip-l' else 1280
+                        self.positional_embedding = nn.Parameter(torch.zeros(77, embed_dim))
+                
+                # Store the actual transformer layers
+                self.encoder_layers = None
+                if hasattr(transformer, 'encoder'):
+                    self.encoder_layers = transformer.encoder
+                elif hasattr(transformer, 'layers'):
+                    self.encoder_layers = transformer.layers
+                
+                # Final layer norm
+                self.final_layer_norm = None
+                if hasattr(transformer, 'final_layer_norm'):
+                    self.final_layer_norm = transformer.final_layer_norm
+                elif hasattr(transformer, 'ln_final'):
+                    self.final_layer_norm = transformer.ln_final
+                
+            def forward(self, input_ids):
+                # Simple forward pass that mimics CLIP text encoder
+                # Embed tokens
+                token_embeds = self.token_embedding(input_ids)
+                
+                # Add positional embeddings
+                seq_len = token_embeds.size(1)
+                pos_embeds = self.positional_embedding[:seq_len]
+                embeddings = token_embeds + pos_embeds
+                
+                # Pass through encoder if available
+                if self.encoder_layers is not None:
+                    hidden_states = self.encoder_layers(embeddings)
+                else:
+                    hidden_states = embeddings
+                
+                # Apply final layer norm if available
+                if self.final_layer_norm is not None:
+                    hidden_states = self.final_layer_norm(hidden_states)
+                
+                if self.clip_type == 'clip-g':
+                    # For CLIP-G, return both sequence output and pooled output
+                    # Use the embedding of the first token (CLS token) as pooled output
+                    pooled_output = hidden_states[:, 0]
+                    return hidden_states, pooled_output
+                else:
+                    # For CLIP-L, just return the sequence output
+                    return hidden_states
+        
+        wrapper = CLIPWrapper(transformer, clip_type)
+        wrapper.eval()
+        return wrapper
+ 
+      
+  
     
     def _create_single_clip_engine(self, model, engine_path, clip_type, 
                                  prompt_batch_min, prompt_batch_opt, prompt_batch_max):
