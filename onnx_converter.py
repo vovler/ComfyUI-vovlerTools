@@ -88,12 +88,14 @@ class SDXLDirectoryToOnnx:
         print(f"[INFO] ONNX Exporter: Source model directory: {source_model_dir}")
         print(f"[INFO] ONNX Exporter: Final models will be saved in: {final_output_dir}")
 
-        torch_dtype = torch.float16 if use_fp16 else torch.float32
+        # THE KEY FIX: Always load the pipeline in FP32 to ensure dummy inputs match model weights during tracing.
+        # The 'export' function's 'dtype' argument will handle the conversion to FP16 for the final file.
+        torch_dtype = torch.float32
         onnx_dtype = "fp16" if use_fp16 else "fp32"
         pipeline = None
 
         try:
-            print("\n[INFO] ONNX Exporter: Loading entire pipeline to resolve component configurations...")
+            print("\n[INFO] ONNX Exporter: Loading entire pipeline in FP32 for tracing compatibility...")
             pipeline = StableDiffusionXLPipeline.from_pretrained(source_model_dir, torch_dtype=torch_dtype).to(self.device)
             print("[INFO] ONNX Exporter: Pipeline loaded successfully.")
 
@@ -102,15 +104,11 @@ class SDXLDirectoryToOnnx:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
 
-                # THE KEY FIX: Create a custom OnnxConfig for the UNet that overrides the 'values_override' property.
                 class CustomUNetOnnxConfig(UNetOnnxConfig):
-                    def __init__(self, config):
-                        super().__init__(config)
-                    
                     @property
                     def values_override(self):
                         return {"text_encoder_projection_dim": pipeline.text_encoder_2.config.projection_dim}
-                
+
                 unet_config = CustomUNetOnnxConfig(pipeline.unet.config)
 
                 export(model=pipeline.unet, config=unet_config, output=unet_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
