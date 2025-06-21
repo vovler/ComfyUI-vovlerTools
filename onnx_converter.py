@@ -9,7 +9,8 @@ import torch
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx import main_export
-from diffusers import VAEModel
+# CORRECTED: Import AutoencoderKL from its specific submodule
+from diffusers.models.autoencoder_kl import AutoencoderKL
 
 
 # --- Helper function for exporting components ---
@@ -25,7 +26,7 @@ def export_component(component_name, source_path, final_output_dir, optimization
         print(f"[INFO] ONNX Exporter: Output directory '{final_component_path}' already exists. Skipping component.")
         return True
 
-    # CORRECTED: Use the specific tasks registered in optimum's model_configs.py
+    # Use the specific tasks registered in optimum's model_configs.py
     task_map = {
         "unet": "semantic-segmentation",
         "text_encoder": "feature-extraction",
@@ -49,22 +50,19 @@ def export_component(component_name, source_path, final_output_dir, optimization
                 task=task,
                 framework="pt",
                 device=device,
-                fp16=use_fp16, # Apply fp16 during export if requested
-                no_post_process=True # We will do our own optimization
+                fp16=use_fp16,
+                no_post_process=True
             )
             
-            # After export, the temp directory contains the model.onnx and config files.
-            # We can now optimize it.
             optimizer = ORTOptimizer.from_pretrained(tmpdir_export)
             optimization_config = OptimizationConfig(
                 optimization_level=optimization_level,
-                fp16=False # FP16 conversion is already done during export for better consistency.
+                fp16=False # FP16 conversion is already done during export.
             )
             
             device_used = "GPU" if gpu_available else "CPU"
             print(f"[INFO] ONNX Exporter: Optimizing {component_name} on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
             
-            # The optimized model will be saved in a new directory structure
             optimizer.optimize(save_dir=final_component_path, optimization_config=optimization_config)
 
             print(f"\033[92m[SUCCESS] ONNX Exporter: Successfully exported and optimized {component_name} to:\n{final_component_path}\033[0m")
@@ -152,9 +150,9 @@ class SDXLDirectoryToOnnx:
                     with tempfile.TemporaryDirectory() as tmp_vae_dir:
                         print("[INFO] ONNX Exporter: Loading VAE and splitting into encoder/decoder for export...")
                         
-                        # Load the complete VAE model from the source directory
                         dtype = torch.float16 if use_fp16 else torch.float32
-                        vae = VAEModel.from_pretrained(vae_source_path, torch_dtype=dtype)
+                        # CORRECTED: Use the correct class name to load the VAE
+                        vae = AutoencoderKL.from_pretrained(vae_source_path, torch_dtype=dtype)
                         
                         # Save the encoder and decoder parts to separate temporary directories
                         encoder_path = os.path.join(tmp_vae_dir, 'encoder')
@@ -162,13 +160,11 @@ class SDXLDirectoryToOnnx:
                         vae.encoder.save_pretrained(encoder_path)
                         vae.decoder.save_pretrained(decoder_path)
                         
-                        # Free up memory
                         del vae
                         if torch.cuda.is_available():
                             torch.cuda.empty_cache()
 
                         print("[INFO] ONNX Exporter: VAE split complete. Exporting sub-models...")
-                        # Now, export each part using our standard component exporter
                         export_component("vae_encoder", encoder_path, final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
                         export_component("vae_decoder", decoder_path, final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
 
