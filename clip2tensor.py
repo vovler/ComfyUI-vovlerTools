@@ -305,9 +305,12 @@ class DualCLIPToTensorRT:
                 log(f"CLIP-L transformer type: {type(clip_l_model)}", "DEBUG", True)
             
             if hasattr(clip_object_1.cond_stage_model, 'clip_g') and clip_object_1.cond_stage_model.clip_g is not None:
-                clip_g_model = clip_object_1.cond_stage_model.clip_g.transformer
+                # For CLIP-G, get the raw transformer without layer extraction
+                clip_g_obj = clip_object_1.cond_stage_model.clip_g
+                clip_g_model = clip_g_obj.transformer
                 log(f"Found CLIP-G in first model ({clip_name1})", "DEBUG", True)
                 log(f"CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
+                log(f"CLIP-G parent config: layer={getattr(clip_g_obj, 'layer', None)}, layer_idx={getattr(clip_g_obj, 'layer_idx', None)}", "DEBUG", True)
             
             # Check second model for CLIP-L and CLIP-G
             log("Inspecting second model structure...", "DEBUG", True)
@@ -321,9 +324,12 @@ class DualCLIPToTensorRT:
             
             if hasattr(clip_object_2.cond_stage_model, 'clip_g') and clip_object_2.cond_stage_model.clip_g is not None:
                 if clip_g_model is None:
-                    clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
+                    # For CLIP-G, get the raw transformer without layer extraction
+                    clip_g_obj = clip_object_2.cond_stage_model.clip_g
+                    clip_g_model = clip_g_obj.transformer
                     log(f"Found CLIP-G in second model ({clip_name2})", "DEBUG", True)
                     log(f"CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
+                    log(f"CLIP-G parent config: layer={getattr(clip_g_obj, 'layer', None)}, layer_idx={getattr(clip_g_obj, 'layer_idx', None)}", "DEBUG", True)
                 else:
                     log(f"Second model also has CLIP-G, using first model's CLIP-G", "DEBUG", True)
             
@@ -385,14 +391,17 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
-                    # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
-                    # For CLIP-G we need both sequence output and projected pooled output
+                    # Raw CLIPTextModel returns (x[0], x[1], out, x[2]) where:
+                    # x[0] = last hidden state, x[1] = intermediate, out = projected, x[2] = pooled
+                    # For CLIP-G we need to mimic SDXLClipG behavior (penultimate layer + projection)
                     print(f"[CLIP_G_Wrapper] Forward called with input_ids shape: {input_ids.shape}")
                     print(f"[CLIP_G_Wrapper] Input device: {input_ids.device}, dtype: {input_ids.dtype}")
                     print(f"[CLIP_G_Wrapper] Input min/max: {input_ids.min()}/{input_ids.max()}")
                     
                     try:
-                        outputs = self.clip_g(input_tokens=input_ids)
+                        # Call the raw transformer with intermediate_output to get penultimate layer
+                        # SDXLClipG uses layer_idx=-2 (penultimate layer)
+                        outputs = self.clip_g(input_tokens=input_ids, intermediate_output=-2, final_layer_norm_intermediate=False)
                         print(f"[CLIP_G_Wrapper] Raw CLIP-G outputs: {len(outputs)} items")
                         for i, output in enumerate(outputs):
                             if output is not None:
@@ -400,8 +409,19 @@ class DualCLIPToTensorRT:
                             else:
                                 print(f"[CLIP_G_Wrapper] Raw output[{i}]: None")
                         
-                        last_hidden_state = outputs[0]  # sequence output
-                        projected_pooled = outputs[2]   # projected pooled output (for CLIPTextModelWithProjection)
+                        # For SDXLClipG behavior, we want:
+                        # - intermediate output (penultimate layer) as sequence
+                        # - projected pooled output  
+                        if len(outputs) >= 3 and outputs[1] is not None:
+                            # Use intermediate output (penultimate layer) as sequence
+                            last_hidden_state = outputs[1]  # intermediate output from layer -2
+                            projected_pooled = outputs[2]   # projected pooled output
+                            print(f"[CLIP_G_Wrapper] Using intermediate (penultimate) layer as sequence")
+                        else:
+                            # Fallback to final layer if intermediate not available
+                            last_hidden_state = outputs[0]  # final layer
+                            projected_pooled = outputs[2]   # projected pooled output
+                            print(f"[CLIP_G_Wrapper] Using final layer as sequence (fallback)")
                         
                         print(f"[CLIP_G_Wrapper] Selected last_hidden_state: shape={last_hidden_state.shape}, dtype={last_hidden_state.dtype}")
                         print(f"[CLIP_G_Wrapper] Selected projected_pooled: shape={projected_pooled.shape}, dtype={projected_pooled.dtype}")
