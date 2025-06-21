@@ -348,6 +348,12 @@ class DualCLIPToTensorRT:
             log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
             log(f"[DEBUG] CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
 
+            # Move models to GPU for conversion
+            device = 'cuda'
+            log(f"Moving models to '{device}' for ONNX export...", "INFO", True)
+            clip_l_model.to(device)
+            clip_g_model.to(device)
+
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
             model_management.soft_empty_cache()
@@ -569,7 +575,8 @@ class DualCLIPToTensorRT:
             log(f"Exporting {clip_type} to ONNX: {os.path.basename(onnx_path)}", "DEBUG", True)
             
             model.eval()
-            dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long)
+            device = next(model.parameters()).device
+            dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long, device=device)
             
             # Single ONNX export attempt - no fallbacks
             log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
