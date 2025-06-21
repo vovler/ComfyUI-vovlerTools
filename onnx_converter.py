@@ -14,10 +14,10 @@ from optimum.exporters.onnx.convert import export
 from diffusers import StableDiffusionXLPipeline
 # Import the specific OnnxConfig classes needed for each component
 from optimum.exporters.onnx.model_configs import (
-    UNetOnnxConfig, 
-    CLIPTextOnnxConfig, 
-    CLIPTextWithProjectionOnnxConfig, 
-    VaeEncoderOnnxConfig, 
+    UNetOnnxConfig,
+    CLIPTextOnnxConfig,
+    CLIPTextWithProjectionOnnxConfig,
+    VaeEncoderOnnxConfig,
     VaeDecoderOnnxConfig
 )
 
@@ -27,7 +27,6 @@ class SDXLDirectoryToOnnx:
     """
     A ComfyUI node to export a model from a diffusers directory structure into
     separate, optimized ONNX files. This is the robust version that correctly
-
     instantiates OnnxConfig objects and handles missing config values.
     """
     OUTPUT_NODE = True
@@ -38,7 +37,7 @@ class SDXLDirectoryToOnnx:
         diffusers_path = os.path.join(folder_paths.base_path, "models", "diffusers")
         os.makedirs(diffusers_path, exist_ok=True)
         model_dirs = [d for d in os.listdir(diffusers_path) if os.path.isdir(os.path.join(diffusers_path, d))]
-        
+
         return {
             "required": {
                 "model_directory": (model_dirs,),
@@ -69,23 +68,23 @@ class SDXLDirectoryToOnnx:
             print(f"[INFO] ONNX Exporter: Optimizing {component_name}...")
             optimizer = ORTOptimizer.from_pretrained(model_path.parent)
             optimization_config = OptimizationConfig(optimization_level=optimization_level)
-            
+
             optimizer.optimize(save_dir=model_path.parent, optimization_config=optimization_config)
-            print(f"\033[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
+            print(f"\032[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
         except Exception as e:
             print(f"\033[91m[ERROR] ONNX Exporter: Could not optimize {component_name}: {e}\033[0m")
             traceback.print_exc()
 
-    def export_from_directory(self, model_directory, output_subfolder_name, optimization_level, use_fp16, 
+    def export_from_directory(self, model_directory, output_subfolder_name, optimization_level, use_fp16,
                               export_unet, export_clip, export_vae, prompt=None, extra_pnginfo=None):
-        
+
         source_model_dir = Path(folder_paths.base_path) / "models" / "diffusers" / model_directory
         if not source_model_dir.is_dir():
             return {"ui": {"text": [f"ERROR: Source directory not found at '{source_model_dir}'."]}}
-            
+
         final_output_dir = Path(folder_paths.get_output_directory()) / output_subfolder_name
         final_output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         print(f"[INFO] ONNX Exporter: Source model directory: {source_model_dir}")
         print(f"[INFO] ONNX Exporter: Final models will be saved in: {final_output_dir}")
 
@@ -102,13 +101,16 @@ class SDXLDirectoryToOnnx:
             if export_unet:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
-                
-                # THE KEY FIX: Manually provide the missing projection_dim to the UNet's ONNX config
-                unet_config = UNetOnnxConfig(pipeline.unet.config)
-                unet_config.values_override = {
+
+                # THE KEY FIX: Prepare the override dictionary and pass it during object creation.
+                override_values = {
                     "text_encoder_projection_dim": pipeline.text_encoder_2.config.projection_dim,
                 }
-                
+                unet_config = UNetOnnxConfig(
+                    config=pipeline.unet.config,
+                    values_override=override_values
+                )
+
                 export(model=pipeline.unet, config=unet_config, output=unet_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.unet.config.save_pretrained(unet_path)
                 self.optimize_model(unet_path / "model.onnx", "UNet", optimization_level)
@@ -128,7 +130,7 @@ class SDXLDirectoryToOnnx:
                 export(model=pipeline.text_encoder_2, config=text_encoder_2_config, output=text_encoder_2_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.text_encoder_2.config.save_pretrained(text_encoder_2_path)
                 self.optimize_model(text_encoder_2_path / "model.onnx", "Text Encoder 2", optimization_level)
-                
+
                 print("[INFO] ONNX Exporter: Copying tokenizer files...")
                 shutil.copytree(source_model_dir / "tokenizer", final_output_dir / "tokenizer", dirs_exist_ok=True)
                 shutil.copytree(source_model_dir / "tokenizer_2", final_output_dir / "tokenizer_2", dirs_exist_ok=True)
