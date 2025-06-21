@@ -14,7 +14,7 @@ from optimum.exporters.onnx import export
 class SDXLClipToOnnx:
     """
     A ComfyUI node to export SDXL CLIP-L and CLIP-G models to ONNX format.
-    This version saves the models as single .onnx files in the /models/clips/ directory.
+    This version saves the models as single .onnx files in the /models/clip/ directory.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -43,11 +43,11 @@ class SDXLClipToOnnx:
         else:
             print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
 
-    def export_single_clip(self, clip_model, model_name, clips_base_dir, optimization_level, use_fp16):
+    def export_single_clip(self, clip_model, model_name, clip_base_dir, optimization_level, use_fp16):
         """
         Handles the conversion of a single CLIP model and saves it as a single .onnx file.
         """
-        final_onnx_path = os.path.join(clips_base_dir, f"{model_name}.onnx")
+        final_onnx_path = os.path.join(clip_base_dir, f"{model_name}.onnx")
 
         if os.path.exists(final_onnx_path):
             print(f"[INFO] comfy_onnx_exporter: ONNX model already exists at {final_onnx_path}. Skipping.")
@@ -60,7 +60,8 @@ class SDXLClipToOnnx:
         with tempfile.TemporaryDirectory() as tmpdir_export:
             print(f"[INFO] comfy_onnx_exporter: Saving temporary HuggingFace model to {tmpdir_export}")
             
-            pytorch_model = clip_model.model
+            # CORRECTED: The actual model is in the 'cond_stage_model' attribute
+            pytorch_model = clip_model.cond_stage_model
             tokenizer = clip_model.tokenizer
             
             pytorch_model.save_pretrained(tmpdir_export)
@@ -100,12 +101,12 @@ class SDXLClipToOnnx:
                 traceback.print_exc()
 
     def export_clips_to_onnx(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
-        # Get the main ComfyUI clips directory
-        clips_dir = folder_paths.get_folder_paths("clip")[0]
-        os.makedirs(clips_dir, exist_ok=True)
+        # CORRECTED: The folder name is "clip", not "clips"
+        clip_dir = folder_paths.get_folder_paths("clip")[0]
+        os.makedirs(clip_dir, exist_ok=True)
         
         # Run the export process for each clip
-        self.export_single_clip(clip_l, "clip_l", clips_dir, optimization_level, use_fp16)
-        self.export_single_clip(clip_g, "clip_g", clips_dir, optimization_level, use_fp16)
+        self.export_single_clip(clip_l, "clip_l", clip_dir, optimization_level, use_fp16)
+        self.export_single_clip(clip_g, "clip_g", clip_dir, optimization_level, use_fp16)
         
-        return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{clips_dir}"]}}
+        return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{clip_dir}"]}}
