@@ -1850,7 +1850,7 @@ class DualCLIPToTensorRTV2:
             
             # Create export configuration
             onnx_config = TasksManager.get_exporter_config_constructor(
-                model_type="clip_text_model",
+                model_type="clip",
                 exporter="onnx",
                 task=task,
                 model_name="clip-text",
@@ -1954,7 +1954,7 @@ class DualCLIPToTensorRTV2:
                         num_hidden_layers=12,
                         max_position_embeddings=77,
                         vocab_size=49408,
-                        model_type="clip_text_model"
+                        model_type="clip"
                     )
                 else:  # clip-g
                     self.config = SimpleNamespace(
@@ -1964,7 +1964,7 @@ class DualCLIPToTensorRTV2:
                         num_hidden_layers=32,
                         max_position_embeddings=77,
                         vocab_size=49408,
-                        model_type="clip_text_model"
+                        model_type="clip"
                     )
             
             def forward(self, input_ids, attention_mask=None, **kwargs):
