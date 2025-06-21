@@ -1,5 +1,6 @@
 from .wd14tagger import WD14TaggerAndImageFilterer, WD14TensorRTModelLoader, WDTaggerONNXtoTENSORRT, WD14BlackListLoader
 from .clip2tensor import DualCLIPToTensorRT, DualCLIPToTensorRTV2, CLIPTensorRTLoader, CLIPTensorRTTextEncode
+from .onnx_converter import SDXLClipToOnnx
 
 NODE_CLASS_MAPPINGS = {
     "WD14TaggerAndImageFilterer": WD14TaggerAndImageFilterer,
@@ -10,6 +11,7 @@ NODE_CLASS_MAPPINGS = {
     "DualCLIPToTensorRTV2": DualCLIPToTensorRTV2,
     "CLIPTensorRTLoader": CLIPTensorRTLoader,
     "CLIPTensorRTTextEncode": CLIPTensorRTTextEncode,
+    "SDXLClipToOnnx": SDXLClipToOnnx,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -21,6 +23,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DualCLIPToTensorRTV2": "Dual CLIP to TensorRT V2 (Optimum) 🔄⚡🎯",
     "CLIPTensorRTLoader": "Load CLIP (TensorRT) ⚡",
     "CLIPTensorRTTextEncode": "CLIP Text Encode (TensorRT) ⚡🏷️",
+    "SDXLClipToOnnx": "SDXL CLIP to ONNX Converter 🔄⚡🎯",
 }
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
