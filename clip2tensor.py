@@ -334,16 +334,23 @@ class DualCLIPToTensorRT:
             # Load the first model, which should contain CLIP-L
             log(f"Loading CLIP-L from {clip_name1}...", "DEBUG", True)
             clip_object_1 = comfy.sd.load_clip(ckpt_paths=[clip1_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
-            # Extract the actual PyTorch transformer model for CLIP-L, bypassing ComfyUI's token processing
-            clip_l_transformer = clip_object_1.cond_stage_model.clip_l.transformer
-            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
+
 
             # Load the second model, which should contain CLIP-G
             log(f"Loading CLIP-G from {clip_name2}...", "DEBUG", True)
             clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
-            # Extract the actual PyTorch transformer model for CLIP-G, bypassing ComfyUI's token processing
-            clip_g_transformer = clip_object_2.cond_stage_model.clip_g.transformer
+            
+            
+            clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
+            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
+
+            # Extract the actual PyTorch transformer model for CLIP-G. This is the nn.Module we will export.
+            clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
             log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
+
+            # Clean up the full clip objects to save memory
+            #del clip_object_1, clip_object_2
+            #model_management.soft_empty_cache()
             
             # Create ONNX-exportable wrappers around the transformers
             clip_l_model = self._create_clip_wrapper(clip_l_transformer, "clip-l")
@@ -360,17 +367,17 @@ class DualCLIPToTensorRT:
             
             # Create CLIP-L engine
             clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
-            log(f"Creating CLIP-L engine: {os.path.basename(clip_l_engine_path)}", "INFO", True)
+            log(f"Creating CLIP-L engine: {os.path.basename(clip_l_engine_path)}", "INFO")
             self._create_single_clip_engine(
-                clip_l_model, clip_l_engine_path, "clip-l",
+                clip_l_model, clip_l_engine_path, "clip-l",  # Pass the transformer directly
                 prompt_batch_min, prompt_batch_opt, prompt_batch_max
             )
-            
+
             # Create CLIP-G engine
             clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
-            log(f"Creating CLIP-G engine: {os.path.basename(clip_g_engine_path)}", "INFO", True)
+            log(f"Creating CLIP-G engine: {os.path.basename(clip_g_engine_path)}", "INFO")
             self._create_single_clip_engine(
-                clip_g_model, clip_g_engine_path, "clip-g", 
+                clip_g_model, clip_g_engine_path, "clip-g", # Pass the transformer directly
                 prompt_batch_min, prompt_batch_opt, prompt_batch_max
             )
             
