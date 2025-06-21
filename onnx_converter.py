@@ -7,7 +7,7 @@ import traceback
 # Required imports
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
-from optimum.exporters.onnx import export
+from optimum.exporters.onnx import main_export
 
 
 class SDXLClipToOnnx:
@@ -21,7 +21,7 @@ class SDXLClipToOnnx:
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Create dropdowns for all files in the 'clip' directory
+        # Create dropdowns for all files in the 'clip' directory type
         clip_files = folder_paths.get_filename_list("clip")
         
         return {
@@ -46,17 +46,18 @@ class SDXLClipToOnnx:
         else:
             print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
 
-    def export_single_clip(self, clip_filename, model_key, clip_base_dir, optimization_level, use_fp16):
+    def export_single_clip(self, clip_filename, model_key, output_dir, optimization_level, use_fp16):
         """
         Handles the conversion of a single CLIP model file and saves it as a single .onnx file.
         """
         # The final destination for the single .onnx file
-        final_onnx_path = os.path.join(clip_base_dir, f"{model_key}.onnx")
+        final_onnx_path = os.path.join(output_dir, f"{model_key}.onnx")
         
         # The source directory containing the .safetensors and config.json
         source_model_path = folder_paths.get_full_path("clip", clip_filename)
-        
-        # Optimum expects a directory, not a file path.
+        if not source_model_path:
+             print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find model {clip_filename}. Please ensure it's in a ComfyUI 'clip' model directory.\033[0m")
+             return
         source_model_dir = os.path.dirname(source_model_path)
 
         if os.path.exists(final_onnx_path):
@@ -71,7 +72,13 @@ class SDXLClipToOnnx:
             with tempfile.TemporaryDirectory() as tmpdir:
                 # 1. Export the model directly from its source directory to the temp directory
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
-                export(model_name_or_path=source_model_dir, output=tmpdir, task="feature-extraction")
+                
+                main_export(
+                    model_name_or_path=source_model_dir,
+                    output=tmpdir,
+                    task="feature-extraction",
+                    no_post_process=True # We will do our own optimization.
+                )
 
                 # 2. Create an optimizer for the exported model in the temp directory
                 optimizer = ORTOptimizer.from_pretrained(tmpdir)
@@ -102,12 +109,12 @@ class SDXLClipToOnnx:
             traceback.print_exc()
 
     def export_clips_to_onnx(self, clip_l_name, clip_g_name, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
-        # Get the main ComfyUI clip directory for saving the final files
-        clip_dir = folder_paths.get_folder_paths("clip")[0]
-        os.makedirs(clip_dir, exist_ok=True)
+        # CORRECTED: Explicitly construct the path to ComfyUI/models/clip/
+        output_clip_dir = os.path.join(folder_paths.base_path, "models", "clip")
+        os.makedirs(output_clip_dir, exist_ok=True)
         
         # Run the export process for each selected clip file
-        self.export_single_clip(clip_l_name, "clip_l", clip_dir, optimization_level, use_fp16)
-        self.export_single_clip(clip_g_name, "clip_g", clip_dir, optimization_level, use_fp16)
+        self.export_single_clip(clip_l_name, "clip_l", output_clip_dir, optimization_level, use_fp16)
+        self.export_single_clip(clip_g_name, "clip_g", output_clip_dir, optimization_level, use_fp16)
         
-        return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{clip_dir}"]}}
+        return {"ui": {"text": [f"ONNX export finished. Models saved in:\n{output_clip_dir}"]}}
