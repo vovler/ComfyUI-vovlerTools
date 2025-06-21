@@ -351,10 +351,7 @@ class DualCLIPToTensorRT:
             # Clean up the full clip objects to save memory
             #del clip_object_1, clip_object_2
             #model_management.soft_empty_cache()
-            
-            # Create ONNX-exportable wrappers around the transformers
-            clip_l_model = self._create_clip_wrapper(clip_l_transformer, "clip-l")
-            clip_g_model = self._create_clip_wrapper(clip_g_transformer, "clip-g")
+
             
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
