@@ -478,15 +478,15 @@ class DualCLIPToTensorRT:
             clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
             
             # Create CLIP-L engine
-            #log("Creating CLIP-L TensorRT engine...", "INFO", True)
-            #self._create_single_clip_engine(
-            #    clip_l_wrapper, 
-            #    clip_l_engine_path, 
-            #    'clip-l',
-            #    prompt_batch_min, 
-            #    prompt_batch_opt, 
-            #    prompt_batch_max
-            #)
+            log("Creating CLIP-L TensorRT engine...", "INFO", True)
+            self._create_single_clip_engine(
+                clip_l_wrapper, 
+                clip_l_engine_path, 
+                'clip-l',
+                prompt_batch_min, 
+                prompt_batch_opt, 
+                prompt_batch_max
+            )
             
             # Create CLIP-G engine  
             log("Creating CLIP-G TensorRT engine...", "INFO", True)
