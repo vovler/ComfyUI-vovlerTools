@@ -1028,9 +1028,55 @@ class TensorRTCLIP:
         try:
             batch_size = tokens.shape[0]
             
-            # Allocate GPU memory for input and output
+            log(f"CLIP-L inference - batch_size: {batch_size}", "DEBUG", True)
+            
+            # Debug engine information
+            log(f"CLIP-L engine inputs: {[self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT]}", "DEBUG", True)
+            log(f"CLIP-L engine outputs: {[self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT]}", "DEBUG", True)
+            
+            # Get actual tensor names from engine
+            input_names = [self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT]
+            output_names = [self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT]
+            
+            if not input_names or not output_names:
+                raise RuntimeError(f"No input/output tensors found in CLIP-L engine. Inputs: {input_names}, Outputs: {output_names}")
+            
+            input_name = input_names[0]
+            output_name = output_names[0]
+            
+            log(f"Using input tensor: {input_name}, output tensor: {output_name}", "DEBUG", True)
+            
+            # Get tensor shapes and check compatibility
             input_shape = (batch_size, 77)
-            output_shape = (batch_size, 77, 768)  # CLIP-L hidden size
+            
+            # Check if we need to set input shape for dynamic batching
+            try:
+                # Get the optimization profile shape
+                min_shape = self.clip_l_engine.get_tensor_profile_shape(input_name, 0)[0]
+                opt_shape = self.clip_l_engine.get_tensor_profile_shape(input_name, 0)[1]
+                max_shape = self.clip_l_engine.get_tensor_profile_shape(input_name, 0)[2]
+                
+                log(f"CLIP-L tensor shapes - min: {min_shape}, opt: {opt_shape}, max: {max_shape}", "DEBUG", True)
+                
+                # Set the input shape if it's within the valid range
+                if min_shape[0] <= batch_size <= max_shape[0]:
+                    self.clip_l_context.set_input_shape(input_name, input_shape)
+                    log(f"Set CLIP-L input shape to: {input_shape}", "DEBUG", True)
+                else:
+                    raise RuntimeError(f"Batch size {batch_size} is outside the valid range [{min_shape[0]}, {max_shape[0]}]")
+                    
+            except Exception as shape_error:
+                log(f"Error setting input shape: {str(shape_error)}", "WARNING", True)
+                # Try without setting shape for static batch engines
+            
+            # Get output shape after setting input shape
+            try:
+                output_shape = self.clip_l_context.get_tensor_shape(output_name)
+                log(f"CLIP-L output shape: {output_shape}", "DEBUG", True)
+            except:
+                # Fallback to expected shape
+                output_shape = (batch_size, 77, 768)
+                log(f"Using fallback CLIP-L output shape: {output_shape}", "DEBUG", True)
             
             # Allocate device memory
             d_input = torch.empty(input_shape, dtype=torch.long, device='cuda')
@@ -1039,26 +1085,39 @@ class TensorRTCLIP:
             # Copy input data to device
             d_input.copy_(tokens)
             
-            # Set input binding
-            self.clip_l_context.set_tensor_address('input_ids', d_input.data_ptr())
-            self.clip_l_context.set_tensor_address('last_hidden_state', d_output.data_ptr())
+            log(f"Input tensor shape: {d_input.shape}, dtype: {d_input.dtype}", "DEBUG", True)
+            log(f"Output tensor shape: {d_output.shape}, dtype: {d_output.dtype}", "DEBUG", True)
             
-            # Set dynamic batch size if needed
-            if self.clip_l_engine.get_tensor_profile_shape('input_ids', 0)[0][0] != batch_size:
-                self.clip_l_context.set_input_shape('input_ids', input_shape)
+            # Set tensor addresses
+            self.clip_l_context.set_tensor_address(input_name, d_input.data_ptr())
+            self.clip_l_context.set_tensor_address(output_name, d_output.data_ptr())
             
             # Execute inference
+            log("Executing CLIP-L TensorRT inference...", "DEBUG", True)
             success = self.clip_l_context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            
             if not success:
-                raise RuntimeError("CLIP-L TensorRT inference failed")
+                # Get more detailed error information
+                log("CLIP-L TensorRT execution returned False", "ERROR", True)
+                log("Checking context validity and tensor bindings...", "DEBUG", True)
+                
+                # Check if all required tensors are bound
+                for i in range(self.clip_l_engine.num_io_tensors):
+                    tensor_name = self.clip_l_engine.get_tensor_name(i)
+                    is_bound = self.clip_l_context.get_tensor_address(tensor_name) != 0
+                    log(f"Tensor {tensor_name} bound: {is_bound}", "DEBUG", True)
+                
+                raise RuntimeError("CLIP-L TensorRT execute_async_v3 returned False")
             
             # Synchronize and return result
             torch.cuda.synchronize()
+            log("CLIP-L TensorRT inference completed successfully", "DEBUG", True)
             return d_output.clone()
             
         except Exception as e:
             log_error_with_traceback("CLIP-L TensorRT inference failed", e)
             # Fallback to dummy embeddings
+            log("Using fallback dummy embeddings for CLIP-L", "WARNING", True)
             return torch.zeros((batch_size, 77, 768), dtype=torch.float16, device='cuda')
     
     def _run_clip_g_inference(self, tokens):
@@ -1066,10 +1125,64 @@ class TensorRTCLIP:
         try:
             batch_size = tokens.shape[0]
             
-            # Allocate GPU memory for input and outputs
+            log(f"CLIP-G inference - batch_size: {batch_size}", "DEBUG", True)
+            
+            # Debug engine information
+            log(f"CLIP-G engine inputs: {[self.clip_g_engine.get_tensor_name(i) for i in range(self.clip_g_engine.num_io_tensors) if self.clip_g_engine.get_tensor_mode(self.clip_g_engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT]}", "DEBUG", True)
+            log(f"CLIP-G engine outputs: {[self.clip_g_engine.get_tensor_name(i) for i in range(self.clip_g_engine.num_io_tensors) if self.clip_g_engine.get_tensor_mode(self.clip_g_engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT]}", "DEBUG", True)
+            
+            # Get actual tensor names from engine
+            input_names = [self.clip_g_engine.get_tensor_name(i) for i in range(self.clip_g_engine.num_io_tensors) if self.clip_g_engine.get_tensor_mode(self.clip_g_engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT]
+            output_names = [self.clip_g_engine.get_tensor_name(i) for i in range(self.clip_g_engine.num_io_tensors) if self.clip_g_engine.get_tensor_mode(self.clip_g_engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT]
+            
+            if not input_names:
+                raise RuntimeError(f"No input tensors found in CLIP-G engine. Inputs: {input_names}")
+            if len(output_names) < 2:
+                raise RuntimeError(f"Expected 2 output tensors for CLIP-G, found {len(output_names)}: {output_names}")
+            
+            input_name = input_names[0]
+            # CLIP-G should have 2 outputs: hidden state and pooled output
+            hidden_output_name = output_names[0]  # Usually 'last_hidden_state'
+            pooled_output_name = output_names[1]  # Usually 'pooled_output'
+            
+            log(f"Using input tensor: {input_name}", "DEBUG", True)
+            log(f"Using hidden output tensor: {hidden_output_name}", "DEBUG", True)
+            log(f"Using pooled output tensor: {pooled_output_name}", "DEBUG", True)
+            
+            # Get tensor shapes and check compatibility
             input_shape = (batch_size, 77)
-            hidden_shape = (batch_size, 77, 1280)  # CLIP-G hidden size
-            pooled_shape = (batch_size, 1280)      # CLIP-G pooled size
+            
+            # Check if we need to set input shape for dynamic batching
+            try:
+                # Get the optimization profile shape
+                min_shape = self.clip_g_engine.get_tensor_profile_shape(input_name, 0)[0]
+                opt_shape = self.clip_g_engine.get_tensor_profile_shape(input_name, 0)[1]
+                max_shape = self.clip_g_engine.get_tensor_profile_shape(input_name, 0)[2]
+                
+                log(f"CLIP-G tensor shapes - min: {min_shape}, opt: {opt_shape}, max: {max_shape}", "DEBUG", True)
+                
+                # Set the input shape if it's within the valid range
+                if min_shape[0] <= batch_size <= max_shape[0]:
+                    self.clip_g_context.set_input_shape(input_name, input_shape)
+                    log(f"Set CLIP-G input shape to: {input_shape}", "DEBUG", True)
+                else:
+                    raise RuntimeError(f"Batch size {batch_size} is outside the valid range [{min_shape[0]}, {max_shape[0]}]")
+                    
+            except Exception as shape_error:
+                log(f"Error setting input shape: {str(shape_error)}", "WARNING", True)
+                # Try without setting shape for static batch engines
+            
+            # Get output shapes after setting input shape
+            try:
+                hidden_shape = self.clip_g_context.get_tensor_shape(hidden_output_name)
+                pooled_shape = self.clip_g_context.get_tensor_shape(pooled_output_name)
+                log(f"CLIP-G hidden output shape: {hidden_shape}", "DEBUG", True)
+                log(f"CLIP-G pooled output shape: {pooled_shape}", "DEBUG", True)
+            except:
+                # Fallback to expected shapes
+                hidden_shape = (batch_size, 77, 1280)  # CLIP-G hidden size
+                pooled_shape = (batch_size, 1280)      # CLIP-G pooled size
+                log(f"Using fallback CLIP-G shapes - hidden: {hidden_shape}, pooled: {pooled_shape}", "DEBUG", True)
             
             # Allocate device memory
             d_input = torch.empty(input_shape, dtype=torch.long, device='cuda')
@@ -1079,27 +1192,41 @@ class TensorRTCLIP:
             # Copy input data to device
             d_input.copy_(tokens)
             
-            # Set input and output bindings
-            self.clip_g_context.set_tensor_address('input_ids', d_input.data_ptr())
-            self.clip_g_context.set_tensor_address('last_hidden_state', d_hidden.data_ptr())
-            self.clip_g_context.set_tensor_address('pooled_output', d_pooled.data_ptr())
+            log(f"Input tensor shape: {d_input.shape}, dtype: {d_input.dtype}", "DEBUG", True)
+            log(f"Hidden tensor shape: {d_hidden.shape}, dtype: {d_hidden.dtype}", "DEBUG", True)
+            log(f"Pooled tensor shape: {d_pooled.shape}, dtype: {d_pooled.dtype}", "DEBUG", True)
             
-            # Set dynamic batch size if needed
-            if self.clip_g_engine.get_tensor_profile_shape('input_ids', 0)[0][0] != batch_size:
-                self.clip_g_context.set_input_shape('input_ids', input_shape)
+            # Set tensor addresses
+            self.clip_g_context.set_tensor_address(input_name, d_input.data_ptr())
+            self.clip_g_context.set_tensor_address(hidden_output_name, d_hidden.data_ptr())
+            self.clip_g_context.set_tensor_address(pooled_output_name, d_pooled.data_ptr())
             
             # Execute inference
+            log("Executing CLIP-G TensorRT inference...", "DEBUG", True)
             success = self.clip_g_context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            
             if not success:
-                raise RuntimeError("CLIP-G TensorRT inference failed")
+                # Get more detailed error information
+                log("CLIP-G TensorRT execution returned False", "ERROR", True)
+                log("Checking context validity and tensor bindings...", "DEBUG", True)
+                
+                # Check if all required tensors are bound
+                for i in range(self.clip_g_engine.num_io_tensors):
+                    tensor_name = self.clip_g_engine.get_tensor_name(i)
+                    is_bound = self.clip_g_context.get_tensor_address(tensor_name) != 0
+                    log(f"Tensor {tensor_name} bound: {is_bound}", "DEBUG", True)
+                
+                raise RuntimeError("CLIP-G TensorRT execute_async_v3 returned False")
             
             # Synchronize and return results
             torch.cuda.synchronize()
+            log("CLIP-G TensorRT inference completed successfully", "DEBUG", True)
             return d_hidden.clone(), d_pooled.clone()
             
         except Exception as e:
             log_error_with_traceback("CLIP-G TensorRT inference failed", e)
             # Fallback to dummy embeddings
+            log("Using fallback dummy embeddings for CLIP-G", "WARNING", True)
             hidden = torch.zeros((batch_size, 77, 1280), dtype=torch.float16, device='cuda')
             pooled = torch.zeros((batch_size, 1280), dtype=torch.float16, device='cuda')
             return hidden, pooled
