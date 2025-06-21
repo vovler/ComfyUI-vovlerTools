@@ -896,57 +896,67 @@ class DualCLIPToTensorRT:
             # Only log if there's a major cleanup error
             log(f"Error during cleanup: {str(e)}", "DEBUG", True)
 
-# TensorRT CLIP Implementation - compatible with ComfyUI patterns
 class TensorRTCLIP:
-    """TensorRT Dual CLIP wrapper that mimics ComfyUI's CLIP interface"""
+    """TensorRT CLIP wrapper that implements ComfyUI's CLIP interface"""
     
     def __init__(self, engine_data):
         self.engine_data = engine_data
+        self.clip_l_engine = None
+        self.clip_l_context = None
+        self.clip_g_engine = None
+        self.clip_g_context = None
         
-        # Validate dual engine structure
-        if not isinstance(engine_data, dict) or 'clip_l' not in engine_data or 'clip_g' not in engine_data:
-            raise ValueError("engine_data must contain both 'clip_l' and 'clip_g' engines")
+        # Load both engines
+        if "clip_l" in engine_data:
+            self.clip_l_engine, self.clip_l_context = self._load_engine(engine_data["clip_l"]["engine_path"])
+        if "clip_g" in engine_data:
+            self.clip_g_engine, self.clip_g_context = self._load_engine(engine_data["clip_g"]["engine_path"])
         
-        self.clip_l_engine_path = engine_data['clip_l']['engine_path']
-        self.clip_g_engine_path = engine_data['clip_g']['engine_path']
-        
-        # Initialize TensorRT runtime and engines
-        self.trt_logger = trt.Logger(trt.Logger.WARNING)
-        self.runtime = trt.Runtime(self.trt_logger)
-        
-        # Load engines
-        self.clip_l_engine = self._load_engine(self.clip_l_engine_path)
-        self.clip_g_engine = self._load_engine(self.clip_g_engine_path)
-        
-        # Create execution contexts
-        self.clip_l_context = self.clip_l_engine.create_execution_context()
-        self.clip_g_context = self.clip_g_engine.create_execution_context()
-        
-        # Initialize tokenizer (use ComfyUI's built-in tokenizer)
+        # Initialize tokenizer
         self.tokenizer = self._init_tokenizer()
         
-        log(f"Initialized dual TensorRT CLIP engines:", "INFO", True)
-        log(f"  - CLIP-L: {engine_data['clip_l']['engine_name']}", "INFO", True)
-        log(f"  - CLIP-G: {engine_data['clip_g']['engine_name']}", "INFO", True)
-    
+        # Add properties to match ComfyUI CLIP interface
+        self.layer_idx = None
+        self.tokenizer_options = {}
+        self.use_clip_schedule = False
+        self.apply_hooks_to_conds = None
+        
+        log(f"TensorRT CLIP initialized successfully", "INFO", True)
+        log(f"  - CLIP-L engine: {'Loaded' if self.clip_l_engine else 'Not available'}", "DEBUG", True)
+        log(f"  - CLIP-G engine: {'Loaded' if self.clip_g_engine else 'Not available'}", "DEBUG", True)
+
     def _load_engine(self, engine_path):
-        """Load TensorRT engine from file"""
+        """Load TensorRT engine and create execution context"""
         try:
+            log(f"Loading TensorRT engine: {os.path.basename(engine_path)}", "DEBUG", True)
+            
+            # Create TensorRT logger and runtime
+            trt_logger = trt.Logger(trt.Logger.WARNING)
+            runtime = trt.Runtime(trt_logger)
+            
+            # Load engine from file
             with open(engine_path, 'rb') as f:
                 engine_data = f.read()
-            engine = self.runtime.deserialize_cuda_engine(engine_data)
+            
+            engine = runtime.deserialize_cuda_engine(engine_data)
             if engine is None:
-                raise RuntimeError(f"Failed to load TensorRT engine from {engine_path}")
-            return engine
+                raise RuntimeError(f"Failed to deserialize TensorRT engine from {engine_path}")
+            
+            # Create execution context
+            context = engine.create_execution_context()
+            if context is None:
+                raise RuntimeError(f"Failed to create execution context for {engine_path}")
+            
+            log(f"TensorRT engine loaded successfully: {os.path.basename(engine_path)}", "DEBUG", True)
+            return engine, context
+            
         except Exception as e:
-            log_error_with_traceback(f"Failed to load TensorRT engine from {engine_path}", e)
+            log_error_with_traceback(f"Failed to load TensorRT engine: {engine_path}", e)
             raise
-    
+
     def _init_tokenizer(self):
-        """Initialize CLIP tokenizer using ComfyUI's tokenization"""
+        """Initialize tokenizer - simplified since we handle tokenization externally"""
         try:
-            # Use ComfyUI's built-in CLIP tokenizer
-            import comfy.sd
             # Create a dummy CLIP object to access tokenization
             # This is a bit hacky but works with ComfyUI's architecture
             return None  # We'll use ComfyUI's tokenization directly
@@ -988,15 +998,19 @@ class TensorRTCLIP:
             log("Using fallback tokenization", "WARNING", True)
             return tokens
     
-    def encode_from_tokens_scheduled(self, tokens):
-        """Encode tokens using dual TensorRT engines (main ComfyUI interface)"""
+    def encode_from_tokens_scheduled(self, tokens, unprojected=False, add_dict=None, show_pbar=True):
+        """Encode tokens using dual TensorRT engines - ComfyUI compatible interface"""
         try:
+            if add_dict is None:
+                add_dict = {}
+                
             batch_size = tokens.shape[0]
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             
             log(f"Running dual TensorRT CLIP inference:", "DEBUG", True)
             log(f"  - Batch size: {batch_size}", "DEBUG", True)
             log(f"  - Token sequence length: {tokens.shape[1]}", "DEBUG", True)
+            log(f"  - Unprojected: {unprojected}", "DEBUG", True)
             
             # Move tokens to GPU
             tokens = tokens.to(device)
@@ -1010,19 +1024,82 @@ class TensorRTCLIP:
             # SDXL conditioning format combines both CLIP outputs
             combined_embeddings = torch.cat([clip_l_embeddings, clip_g_embeddings], dim=-1)
             
-            # Return in ComfyUI conditioning format
-            conditioning = [[combined_embeddings, {"pooled_output": pooled_output}]]
+            # Ensure tensors are on CPU and in the right dtype for ComfyUI
+            combined_embeddings = combined_embeddings.cpu().float()
+            pooled_output = pooled_output.cpu().float()
+            
+            # Create pooled dictionary with proper format
+            pooled_dict = {"pooled_output": pooled_output}
+            pooled_dict.update(add_dict)
+            
+            # Return in ComfyUI conditioning format - list of [cond, pooled_dict] pairs
+            all_cond_pooled = [[combined_embeddings, pooled_dict]]
             
             log(f"Dual TensorRT CLIP encoding complete:", "DEBUG", True)
             log(f"  - Combined embeddings shape: {combined_embeddings.shape}", "DEBUG", True)
+            log(f"  - Combined embeddings dtype: {combined_embeddings.dtype}", "DEBUG", True)
             log(f"  - Pooled output shape: {pooled_output.shape}", "DEBUG", True)
+            log(f"  - Pooled output dtype: {pooled_output.dtype}", "DEBUG", True)
+            log(f"  - Return format: List with {len(all_cond_pooled)} conditioning(s)", "DEBUG", True)
             
-            return conditioning
+            return all_cond_pooled
             
         except Exception as e:
             log_error_with_traceback("Dual TensorRT CLIP encoding failed", e)
             raise
     
+    def encode_from_tokens(self, tokens, return_pooled=False, return_dict=False):
+        """Encode tokens - compatibility method for ComfyUI CLIP interface"""
+        try:
+            # Call the main encoding method
+            all_cond_pooled = self.encode_from_tokens_scheduled(tokens)
+            
+            if not all_cond_pooled:
+                raise RuntimeError("No conditioning returned from encode_from_tokens_scheduled")
+            
+            # Extract the first (and typically only) conditioning
+            cond, pooled_dict = all_cond_pooled[0]
+            pooled = pooled_dict.get("pooled_output", None)
+            
+            if return_dict:
+                out = {"cond": cond, "pooled_output": pooled}
+                # Add any additional keys from pooled_dict
+                for k, v in pooled_dict.items():
+                    if k != "pooled_output":
+                        out[k] = v
+                return out
+            
+            if return_pooled:
+                return cond, pooled
+                
+            return cond
+            
+        except Exception as e:
+            log_error_with_traceback("encode_from_tokens failed", e)
+            raise
+    
+    def encode(self, text):
+        """Encode text - high-level interface"""
+        try:
+            tokens = self.tokenize(text)
+            return self.encode_from_tokens(tokens)
+        except Exception as e:
+            log_error_with_traceback("Text encoding failed", e)
+            raise
+    
+    # Add compatibility methods for ComfyUI CLIP interface
+    def clone(self):
+        """Clone the TensorRT CLIP object"""
+        return TensorRTCLIP(self.engine_data)
+    
+    def clip_layer(self, layer_idx):
+        """Set CLIP layer - for compatibility"""
+        self.layer_idx = layer_idx
+    
+    def set_tokenizer_option(self, option_name, value):
+        """Set tokenizer option - for compatibility"""
+        self.tokenizer_options[option_name] = value
+
     def _run_clip_l_inference(self, tokens):
         """Run CLIP-L TensorRT inference"""
         try:
@@ -1080,9 +1157,9 @@ class TensorRTCLIP:
                 output_shape = (batch_size, 77, 768)
                 log(f"Using fallback CLIP-L output shape: {output_shape}", "DEBUG", True)
             
-            # Allocate device memory
+            # Allocate device memory - ensure proper dtype
             d_input = torch.empty(input_shape, dtype=torch.long, device='cuda')
-            d_output = torch.empty(output_shape, dtype=torch.float16, device='cuda')
+            d_output = torch.empty(output_shape, dtype=torch.float16, device='cuda')  # Use fp16 for efficiency
             
             # Copy input data to device
             d_input.copy_(tokens)
@@ -1114,13 +1191,30 @@ class TensorRTCLIP:
             # Synchronize and return result
             torch.cuda.synchronize()
             log("CLIP-L TensorRT inference completed successfully", "DEBUG", True)
-            return d_output.clone()
+            
+            # Ensure output is properly formatted and has valid values
+            result = d_output.clone()
+            
+            # Check for NaN or invalid values
+            if torch.isnan(result).any():
+                log("Warning: NaN values detected in CLIP-L output", "WARNING", True)
+                result = torch.nan_to_num(result, nan=0.0)
+            
+            if torch.isinf(result).any():
+                log("Warning: Inf values detected in CLIP-L output", "WARNING", True)
+                result = torch.nan_to_num(result, posinf=1.0, neginf=-1.0)
+            
+            log(f"CLIP-L output stats - min: {result.min():.6f}, max: {result.max():.6f}, mean: {result.mean():.6f}", "DEBUG", True)
+            
+            return result.cpu().float()  # Convert fp16 to float32 on CPU for ComfyUI compatibility
             
         except Exception as e:
             log_error_with_traceback("CLIP-L TensorRT inference failed", e)
-            # Fallback to dummy embeddings
+            # Fallback to dummy embeddings with proper values
             log("Using fallback dummy embeddings for CLIP-L", "WARNING", True)
-            return torch.zeros((batch_size, 77, 768), dtype=torch.float16, device='cuda')
+            # Create embeddings with small random values instead of zeros
+            fallback = torch.randn((batch_size, 77, 768), dtype=torch.float16, device='cuda') * 0.01
+            return fallback.cpu().float()  # Convert to float32 on CPU for ComfyUI compatibility
     
     def _run_clip_g_inference(self, tokens):
         """Run CLIP-G TensorRT inference"""
@@ -1189,10 +1283,10 @@ class TensorRTCLIP:
                 pooled_shape = (batch_size, 1280)      # CLIP-G pooled size
                 log(f"Using fallback CLIP-G shapes - hidden: {hidden_shape}, pooled: {pooled_shape}", "DEBUG", True)
             
-            # Allocate device memory
+            # Allocate device memory - ensure proper dtype
             d_input = torch.empty(input_shape, dtype=torch.long, device='cuda')
-            d_hidden = torch.empty(hidden_shape, dtype=torch.float16, device='cuda')
-            d_pooled = torch.empty(pooled_shape, dtype=torch.float16, device='cuda')
+            d_hidden = torch.empty(hidden_shape, dtype=torch.float16, device='cuda')  # Use fp16 for efficiency
+            d_pooled = torch.empty(pooled_shape, dtype=torch.float16, device='cuda')  # Use fp16 for efficiency
             
             # Copy input data to device
             d_input.copy_(tokens)
@@ -1226,15 +1320,42 @@ class TensorRTCLIP:
             # Synchronize and return results
             torch.cuda.synchronize()
             log("CLIP-G TensorRT inference completed successfully", "DEBUG", True)
-            return d_hidden.clone(), d_pooled.clone()
+            
+            # Ensure outputs are properly formatted and have valid values
+            hidden_result = d_hidden.clone()
+            pooled_result = d_pooled.clone()
+            
+            # Check for NaN or invalid values in hidden output
+            if torch.isnan(hidden_result).any():
+                log("Warning: NaN values detected in CLIP-G hidden output", "WARNING", True)
+                hidden_result = torch.nan_to_num(hidden_result, nan=0.0)
+            
+            if torch.isinf(hidden_result).any():
+                log("Warning: Inf values detected in CLIP-G hidden output", "WARNING", True)
+                hidden_result = torch.nan_to_num(hidden_result, posinf=1.0, neginf=-1.0)
+            
+            # Check for NaN or invalid values in pooled output
+            if torch.isnan(pooled_result).any():
+                log("Warning: NaN values detected in CLIP-G pooled output", "WARNING", True)
+                pooled_result = torch.nan_to_num(pooled_result, nan=0.0)
+            
+            if torch.isinf(pooled_result).any():
+                log("Warning: Inf values detected in CLIP-G pooled output", "WARNING", True)
+                pooled_result = torch.nan_to_num(pooled_result, posinf=1.0, neginf=-1.0)
+            
+            log(f"CLIP-G hidden stats - min: {hidden_result.min():.6f}, max: {hidden_result.max():.6f}, mean: {hidden_result.mean():.6f}", "DEBUG", True)
+            log(f"CLIP-G pooled stats - min: {pooled_result.min():.6f}, max: {pooled_result.max():.6f}, mean: {pooled_result.mean():.6f}", "DEBUG", True)
+            
+            return hidden_result.cpu().float(), pooled_result.cpu().float()  # Convert fp16 to float32 on CPU for ComfyUI compatibility
             
         except Exception as e:
             log_error_with_traceback("CLIP-G TensorRT inference failed", e)
-            # Fallback to dummy embeddings
+            # Fallback to dummy embeddings with proper values
             log("Using fallback dummy embeddings for CLIP-G", "WARNING", True)
-            hidden = torch.zeros((batch_size, 77, 1280), dtype=torch.float16, device='cuda')
-            pooled = torch.zeros((batch_size, 1280), dtype=torch.float16, device='cuda')
-            return hidden, pooled
+            # Create embeddings with small random values instead of zeros
+            hidden = torch.randn((batch_size, 77, 1280), dtype=torch.float16, device='cuda') * 0.01
+            pooled = torch.randn((batch_size, 1280), dtype=torch.float16, device='cuda') * 0.01
+            return hidden.cpu().float(), pooled.cpu().float()  # Convert to float32 on CPU for ComfyUI compatibility
 
 class CLIPTensorRTLoader:
     """TensorRT Dual CLIP Loader following ComfyUI DualCLIPLoader patterns"""
@@ -1392,17 +1513,22 @@ class CLIPTensorRTTextEncode:
                 log(f"Warning: Very long text ({len(text)} chars), may be truncated", "WARNING", True)
             
             log(f"Encoding text with TensorRT CLIP engine", "INFO", True)
-            log(f"Text: {text[:50]}{'...' if len(text) > 50 else ''}", "DEBUG", True)
-            log(f"Engine: {clip.engine_data.get('engine_name', 'unknown')}", "DEBUG", True)
+            log(f"Text: '{text[:50]}{'...' if len(text) > 50 else ''}'", "DEBUG", True)
             
             # Tokenize text
             tokens = clip.tokenize(text)
             
-            # Encode using TensorRT
-            conditioning = clip.encode_from_tokens_scheduled(tokens)
+            # Encode using TensorRT - this returns a list of [cond, pooled_dict] pairs
+            all_cond_pooled = clip.encode_from_tokens_scheduled(tokens)
+            
+            if not all_cond_pooled:
+                raise RuntimeError("No conditioning returned from TensorRT CLIP encoding")
             
             log(f"TensorRT CLIP text encoding complete", "INFO", True)
-            return (conditioning,)
+            log(f"Returned {len(all_cond_pooled)} conditioning(s)", "DEBUG", True)
+            
+            # Return the conditioning list directly (ComfyUI expects this format)
+            return (all_cond_pooled,)
             
         except Exception as e:
             log_error_with_traceback("Failed to encode text with TensorRT CLIP", e)
