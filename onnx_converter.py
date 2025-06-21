@@ -101,7 +101,7 @@ class SDXLClipToOnnx:
 
     def export_clips_to_onnx(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
         # Get the main ComfyUI clips directory
-        clips_dir = folder_paths.get_folder_paths("clips")[0]
+        clips_dir = folder_paths.get_folder_paths("clip")[0]
         os.makedirs(clips_dir, exist_ok=True)
         
         # Run the export process for each clip
