@@ -341,8 +341,8 @@ class DualCLIPToTensorRT:
             clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
             
             
-            clip_l_model = clip_object_1.cond_stage_model.clip_l
-            log(f"Successfully loaded CLIP-L model from {clip_name1}", "DEBUG", True)
+            clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
+            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
 
             clip_g_model = clip_object_2.cond_stage_model.clip_g
             log(f"Successfully loaded CLIP-G model from {clip_name2}", "DEBUG", True)
@@ -367,14 +367,14 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_l = clip_l_model
                 def forward(self, input_ids):
-                    return self.clip_l(input_ids)[0]
+                    return self.clip_l(input_ids=input_ids, return_dict=False)[0]
 
             class CLIP_G_Wrapper(torch.nn.Module):
                 def __init__(self, clip_g_model):
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
-                    outputs = self.clip_g(input_ids)
+                    outputs = self.clip_g(input_ids=input_ids, return_dict=False)
                     return outputs[0], outputs[1]
 
 
