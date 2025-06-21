@@ -1595,4 +1595,518 @@ class CLIPTensorRTTextEncode:
             
             raise
 
+# Add after the existing DualCLIPToTensorRT class, before TensorRTCLIP class
+
+class DualCLIPToTensorRTV2:
+    """Version 2: Uses Hugging Face Optimum for ONNX export and TensorRT conversion"""
+    
+    @classmethod
+    def INPUT_TYPES(s):
+        clip_models = get_available_clip_models()
+        default_model = clip_models[0] if clip_models and "No CLIP models found" not in clip_models[0] else ""
+        
+        return {"required": {
+            "clip_name1": (clip_models, {"default": default_model}),
+            "clip_name2": (clip_models, {"default": default_model}),
+            "output_name": ("STRING", {"default": "dual_clip_v2", "multiline": False}),
+            "prompt_batch_min": ("INT", {"default": 1, "min": 1, "max": 32, "step": 1}),
+            "prompt_batch_opt": ("INT", {"default": 1, "min": 1, "max": 32, "step": 1}),
+            "prompt_batch_max": ("INT", {"default": 8, "min": 1, "max": 32, "step": 1}),
+            "use_fp16": ("BOOLEAN", {"default": True}),
+            "optimization_level": (["O1", "O2", "O3", "O4"], {"default": "O2"}),
+        }}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("status",)
+    FUNCTION = "convert_dual_clip_to_tensorrt_v2"
+    OUTPUT_NODE = True
+    CATEGORY = "vovlerTools"
+
+    def convert_dual_clip_to_tensorrt_v2(self, clip_name1, clip_name2, output_name, 
+                                        prompt_batch_min, prompt_batch_opt, prompt_batch_max,
+                                        use_fp16, optimization_level):
+        
+        try:
+            # Import required libraries for Optimum
+            try:
+                from optimum.onnxruntime import ORTModelForFeatureExtraction
+                from optimum.exporters import TasksManager
+                from transformers import CLIPTextModel, CLIPTokenizer
+                import onnx
+                log("Successfully imported Optimum and required libraries", "DEBUG", True)
+            except ImportError as e:
+                error_msg = f"Required libraries not found: {str(e)}\n"
+                error_msg += "Please install: pip install optimum[onnxruntime-gpu] transformers onnx"
+                log(error_msg, "ERROR", True)
+                return (error_msg,)
+            
+            # Log system information for debugging
+            log_system_info()
+            
+            # Validate inputs (same as V1)
+            if "No CLIP models found" in clip_name1 or "No CLIP models found" in clip_name2:
+                error_msg = "CLIP models not found. Please place .safetensors files in models/clip folder."
+                log(error_msg, "ERROR", True)
+                return (error_msg,)
+            
+            if clip_name1 == clip_name2:
+                error_msg = "Please select two different CLIP models for dual CLIP conversion."
+                log(error_msg, "ERROR", True)
+                return (error_msg,)
+            
+            # Validate batch size parameters
+            if not (1 <= prompt_batch_min <= prompt_batch_opt <= prompt_batch_max <= 32):
+                error_msg = f"Invalid batch size configuration: min={prompt_batch_min}, opt={prompt_batch_opt}, max={prompt_batch_max}"
+                log(error_msg, "ERROR", True)
+                return (error_msg,)
+            
+            # Sanitize output name
+            import re
+            sanitized_name = re.sub(r'[<>:"/\\|?*]', '_', output_name.strip())
+            if sanitized_name != output_name.strip():
+                log(f"Output name sanitized from '{output_name}' to '{sanitized_name}'", "WARNING", True)
+                output_name = sanitized_name
+            
+            clip1_path = os.path.join(clip_models_dir, clip_name1)
+            clip2_path = os.path.join(clip_models_dir, clip_name2)
+            
+            # Validate file access
+            if not validate_file_access(clip1_path, "read") or not validate_file_access(clip2_path, "read"):
+                error_msg = "Cannot access one or both CLIP model files"
+                log(error_msg, "ERROR", True)
+                return (error_msg,)
+            
+            # Create engine filename
+            precision = "fp16" if use_fp16 else "fp32"
+            engine_filename = f"{output_name}_sdxl_{prompt_batch_min}_{prompt_batch_opt}_{prompt_batch_max}_{precision}_v2.engine"
+            engine_path = os.path.join(tensorrt_output_dir, engine_filename)
+            
+            # Check if engine already exists
+            if os.path.exists(engine_path):
+                engine_size = os.path.getsize(engine_path) / (1024*1024)
+                success_msg = f"TensorRT engine already exists: {engine_filename} ({engine_size:.1f}MB)"
+                log(success_msg, "INFO", True)
+                return (success_msg,)
+            
+            log(f"Starting dual CLIP to TensorRT V2 conversion...", "INFO", True)
+            log(f"CLIP 1: {clip_name1}", "INFO", True)
+            log(f"CLIP 2: {clip_name2}", "INFO", True)
+            log(f"Precision: {precision}", "INFO", True)
+            log(f"Optimization level: {optimization_level}", "INFO", True)
+            log(f"Batch sizes: {prompt_batch_min}/{prompt_batch_opt}/{prompt_batch_max}", "INFO", True)
+            
+            # Initialize engine paths for cleanup
+            clip_l_engine_path = None
+            clip_g_engine_path = None
+            
+            # Load CLIP models using ComfyUI's built-in functionality
+            log("Loading CLIP models using ComfyUI's native loader...", "INFO", True)
+            clip_object_1 = comfy.sd.load_clip(ckpt_paths=[clip1_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
+            
+            # Extract CLIP models
+            clip_l_model = None
+            clip_g_model = None
+            
+            # Check first model
+            if hasattr(clip_object_1.cond_stage_model, 'clip_l') and clip_object_1.cond_stage_model.clip_l is not None:
+                clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
+                log(f"Found CLIP-L in first model ({clip_name1})", "DEBUG", True)
+            
+            if hasattr(clip_object_1.cond_stage_model, 'clip_g') and clip_object_1.cond_stage_model.clip_g is not None:
+                clip_g_model = clip_object_1.cond_stage_model.clip_g.transformer
+                log(f"Found CLIP-G in first model ({clip_name1})", "DEBUG", True)
+            
+            # Check second model
+            if hasattr(clip_object_2.cond_stage_model, 'clip_l') and clip_object_2.cond_stage_model.clip_l is not None:
+                if clip_l_model is None:
+                    clip_l_model = clip_object_2.cond_stage_model.clip_l.transformer
+                    log(f"Found CLIP-L in second model ({clip_name2})", "DEBUG", True)
+            
+            if hasattr(clip_object_2.cond_stage_model, 'clip_g') and clip_object_2.cond_stage_model.clip_g is not None:
+                if clip_g_model is None:
+                    clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
+                    log(f"Found CLIP-G in second model ({clip_name2})", "DEBUG", True)
+            
+            # Validate that we found both models
+            if clip_l_model is None:
+                raise ValueError(f"Could not find CLIP-L model in either {clip_name1} or {clip_name2}")
+            if clip_g_model is None:
+                raise ValueError(f"Could not find CLIP-G model in either {clip_name1} or {clip_name2}")
+            
+            log("Successfully located both CLIP-L and CLIP-G models", "INFO", True)
+            
+            # Move models to GPU
+            device = 'cuda'
+            clip_l_model = clip_l_model.to(device)
+            clip_g_model = clip_g_model.to(device)
+            
+            # Create separate engines using Optimum
+            clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
+            clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
+            
+            # Create CLIP-L engine using Optimum
+            log("Creating CLIP-L TensorRT engine using Optimum...", "INFO", True)
+            self._create_optimum_tensorrt_engine(
+                clip_l_model, 
+                clip_l_engine_path, 
+                'clip-l',
+                prompt_batch_min, 
+                prompt_batch_opt, 
+                prompt_batch_max,
+                use_fp16,
+                optimization_level
+            )
+            
+            # Create CLIP-G engine using Optimum
+            log("Creating CLIP-G TensorRT engine using Optimum...", "INFO", True)
+            self._create_optimum_tensorrt_engine(
+                clip_g_model, 
+                clip_g_engine_path, 
+                'clip-g',
+                prompt_batch_min, 
+                prompt_batch_opt, 
+                prompt_batch_max,
+                use_fp16,
+                optimization_level
+            )
+            
+            # Success message
+            clip_l_size = os.path.getsize(clip_l_engine_path) / (1024*1024)
+            clip_g_size = os.path.getsize(clip_g_engine_path) / (1024*1024)
+            success_msg = f"Dual CLIP TensorRT V2 engines created successfully:\n"
+            success_msg += f"  - CLIP-L: {os.path.basename(clip_l_engine_path)} ({clip_l_size:.1f}MB)\n" 
+            success_msg += f"  - CLIP-G: {os.path.basename(clip_g_engine_path)} ({clip_g_size:.1f}MB)"
+            
+            log(success_msg, "INFO", True)
+            return (success_msg,)
+            
+        except Exception as e:
+            error_msg = f"Error during dual CLIP to TensorRT V2 conversion: {str(e)}"
+            log_error_with_traceback(error_msg, e)
+            
+            # Clean up any partial engine files
+            if clip_l_engine_path and os.path.exists(clip_l_engine_path):
+                try:
+                    os.remove(clip_l_engine_path)
+                    log(f"Cleaned up partial CLIP-L engine file", "DEBUG", True)
+                except:
+                    pass
+            
+            if clip_g_engine_path and os.path.exists(clip_g_engine_path):
+                try:
+                    os.remove(clip_g_engine_path)
+                    log(f"Cleaned up partial CLIP-G engine file", "DEBUG", True)
+                except:
+                    pass
+            
+            return (error_msg,)
+
+    def _create_optimum_tensorrt_engine(self, model, engine_path, clip_type, 
+                                       prompt_batch_min, prompt_batch_opt, prompt_batch_max,
+                                       use_fp16, optimization_level):
+        """Create TensorRT engine using Hugging Face Optimum"""
+        
+        temp_dir = None
+        try:
+            import tempfile
+            from optimum.onnxruntime import ORTModelForFeatureExtraction
+            from optimum.exporters.onnx import main_export
+            from transformers import CLIPTextModel, CLIPTokenizer
+            import onnx
+            
+            log(f"Creating {clip_type} TensorRT engine using Optimum...", "INFO", True)
+            
+            # Create temporary directory for intermediate files
+            temp_dir = tempfile.mkdtemp(prefix=f"clip_{clip_type}_")
+            log(f"Using temporary directory: {temp_dir}", "DEBUG", True)
+            
+            # Step 1: Create a Hugging Face compatible model wrapper
+            hf_model = self._create_hf_compatible_model(model, clip_type)
+            
+            # Step 2: Export to ONNX using Optimum
+            onnx_path = os.path.join(temp_dir, f"{clip_type}.onnx")
+            log(f"Exporting {clip_type} to ONNX using Optimum...", "DEBUG", True)
+            
+            # Create tokenizer for export
+            tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+            
+            # Define dynamic axes for batching
+            dynamic_axes = {
+                "input_ids": {0: "batch_size"},
+                "last_hidden_state": {0: "batch_size"}
+            }
+            
+            if clip_type == 'clip-g':
+                dynamic_axes["pooled_output"] = {0: "batch_size"}
+            
+            # Export using Optimum's ONNX exporter
+            from optimum.exporters.onnx import export_models
+            from optimum.exporters.tasks import TasksManager
+            
+            # Get the task configuration
+            task = "feature-extraction"
+            model_config = hf_model.config if hasattr(hf_model, 'config') else None
+            
+            # Create export configuration
+            onnx_config = TasksManager.get_exporter_config_constructor(
+                model_type="clip_text_model",
+                exporter="onnx",
+                task=task,
+                model_name="clip-text",
+                library_name="transformers"
+            )(model_config) if model_config else None
+            
+            if onnx_config is None:
+                log(f"Using manual ONNX export for {clip_type}...", "DEBUG", True)
+                # Fallback to manual export
+                self._manual_onnx_export_optimum(hf_model, tokenizer, onnx_path, clip_type, 
+                                                prompt_batch_opt, dynamic_axes)
+            else:
+                log(f"Using Optimum automatic export for {clip_type}...", "DEBUG", True)
+                # Use Optimum's automatic export
+                export_models(
+                    model=hf_model,
+                    config=onnx_config,
+                    tokenizer=tokenizer,
+                    output_dir=temp_dir,
+                    opset=16
+                )
+                # Move the exported model to our expected path
+                exported_path = os.path.join(temp_dir, "model.onnx")
+                if os.path.exists(exported_path):
+                    os.rename(exported_path, onnx_path)
+            
+            # Validate ONNX model
+            if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
+                raise RuntimeError(f"ONNX export failed for {clip_type}: file not created or empty")
+            
+            # Step 3: Optimize ONNX model using Optimum
+            log(f"Optimizing {clip_type} ONNX model...", "DEBUG", True)
+            optimized_onnx_path = os.path.join(temp_dir, f"{clip_type}_optimized.onnx")
+            
+            try:
+                from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
+                
+                # Create optimization configuration
+                optimization_config = OptimizationConfig(
+                    optimization_level=optimization_level,
+                    optimize_for_gpu=True,
+                    fp16=use_fp16
+                )
+                
+                # Load and optimize
+                optimizer = ORTOptimizer.from_pretrained(temp_dir)
+                optimizer.optimize(
+                    save_dir=temp_dir,
+                    optimization_config=optimization_config,
+                    file_suffix="_optimized"
+                )
+                
+                # Check if optimized model exists
+                if os.path.exists(optimized_onnx_path):
+                    onnx_path = optimized_onnx_path
+                    log(f"{clip_type} ONNX optimization completed", "DEBUG", True)
+                else:
+                    log(f"{clip_type} ONNX optimization skipped - using original", "DEBUG", True)
+                    
+            except Exception as opt_error:
+                log(f"ONNX optimization failed for {clip_type}: {str(opt_error)}", "WARNING", True)
+                log("Continuing with non-optimized ONNX model", "DEBUG", True)
+            
+            # Step 4: Convert ONNX to TensorRT using improved method
+            log(f"Converting {clip_type} ONNX to TensorRT...", "DEBUG", True)
+            self._onnx_to_tensorrt_optimum(onnx_path, engine_path, clip_type,
+                                          prompt_batch_min, prompt_batch_opt, prompt_batch_max,
+                                          use_fp16)
+            
+            log(f"{clip_type} TensorRT engine created successfully using Optimum", "INFO", True)
+            
+        except Exception as e:
+            log_error_with_traceback(f"Failed to create {clip_type} TensorRT engine using Optimum", e)
+            raise
+        finally:
+            # Clean up temporary directory
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    import shutil
+                    shutil.rmtree(temp_dir)
+                    log(f"Cleaned up temporary directory for {clip_type}", "DEBUG", True)
+                except Exception as cleanup_error:
+                    log(f"Failed to clean up temporary directory: {str(cleanup_error)}", "WARNING", True)
+
+    def _create_hf_compatible_model(self, model, clip_type):
+        """Create a Hugging Face compatible model wrapper"""
+        
+        class HFCompatibleCLIP(torch.nn.Module):
+            def __init__(self, clip_model, clip_type):
+                super().__init__()
+                self.clip_model = clip_model
+                self.clip_type = clip_type
+                
+                # Create a basic config for HF compatibility
+                from types import SimpleNamespace
+                if clip_type == 'clip-l':
+                    self.config = SimpleNamespace(
+                        hidden_size=768,
+                        intermediate_size=3072,
+                        num_attention_heads=12,
+                        num_hidden_layers=12,
+                        max_position_embeddings=77,
+                        vocab_size=49408,
+                        model_type="clip_text_model"
+                    )
+                else:  # clip-g
+                    self.config = SimpleNamespace(
+                        hidden_size=1280,
+                        intermediate_size=5120,
+                        num_attention_heads=20,
+                        num_hidden_layers=32,
+                        max_position_embeddings=77,
+                        vocab_size=49408,
+                        model_type="clip_text_model"
+                    )
+            
+            def forward(self, input_ids, attention_mask=None, **kwargs):
+                # Call the original model
+                outputs = self.clip_model(input_tokens=input_ids)
+                
+                if self.clip_type == 'clip-l':
+                    # CLIP-L only returns sequence output
+                    return SimpleNamespace(
+                        last_hidden_state=outputs[0],
+                        hidden_states=None,
+                        attentions=None
+                    )
+                else:  # clip-g
+                    # CLIP-G returns both sequence and pooled output
+                    return SimpleNamespace(
+                        last_hidden_state=outputs[0],
+                        pooler_output=outputs[2] if len(outputs) > 2 else None,
+                        hidden_states=None,
+                        attentions=None
+                    )
+        
+        return HFCompatibleCLIP(model, clip_type)
+
+    def _manual_onnx_export_optimum(self, model, tokenizer, onnx_path, clip_type, 
+                                   batch_size, dynamic_axes):
+        """Manual ONNX export with Optimum-style configuration"""
+        
+        try:
+            # Create dummy input
+            dummy_input = torch.randint(0, 49408, (batch_size, 77), dtype=torch.long, device=model.clip_model.device)
+            
+            # Define output names
+            if clip_type == 'clip-g':
+                output_names = ['last_hidden_state', 'pooled_output']
+            else:
+                output_names = ['last_hidden_state']
+            
+            # Export with improved settings
+            model.eval()
+            with torch.no_grad():
+                torch.onnx.export(
+                    model,
+                    dummy_input,
+                    onnx_path,
+                    export_params=True,
+                    opset_version=16,
+                    do_constant_folding=True,
+                    input_names=['input_ids'],
+                    output_names=output_names,
+                    dynamic_axes=dynamic_axes,
+                    verbose=False,
+                    keep_initializers_as_inputs=False,
+                    export_modules_as_functions=False
+                )
+            
+            log(f"Manual ONNX export completed for {clip_type}", "DEBUG", True)
+            
+        except Exception as e:
+            log_error_with_traceback(f"Manual ONNX export failed for {clip_type}", e)
+            raise
+
+    def _onnx_to_tensorrt_optimum(self, onnx_path, engine_path, clip_type,
+                                 prompt_batch_min, prompt_batch_opt, prompt_batch_max,
+                                 use_fp16):
+        """Convert ONNX to TensorRT with improved settings for Optimum models"""
+        
+        try:
+            # Get GPU memory
+            gpu_memory_gb = get_gpu_memory_gb()
+            memory_pool_bytes = int(gpu_memory_gb * 0.8 * 1024**3)
+            
+            log(f"Converting {clip_type} ONNX to TensorRT with improved settings", "DEBUG", True)
+            log(f"Memory pool: {memory_pool_bytes / (1024**3):.1f}GB", "DEBUG", True)
+            log(f"Precision: {'FP16' if use_fp16 else 'FP32'}", "DEBUG", True)
+            
+            # Create TensorRT logger and builder
+            TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+            builder = trt.Builder(TRT_LOGGER)
+            
+            # Create network from ONNX
+            network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            parser = trt.OnnxParser(network, TRT_LOGGER)
+            
+            # Parse ONNX file
+            log(f"Parsing ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
+            with open(onnx_path, 'rb') as model_file:
+                onnx_data = model_file.read()
+                
+                if not parser.parse(onnx_data):
+                    log(f"ONNX parsing failed for {clip_type}", "ERROR", True)
+                    for error in range(parser.num_errors):
+                        log(f"Parser Error: {parser.get_error(error)}", "ERROR", True)
+                    raise RuntimeError(f"Failed to parse ONNX file for {clip_type}")
+            
+            log(f"{clip_type} ONNX parsed successfully", "DEBUG", True)
+            
+            # Configure builder with improved settings
+            config = builder.create_builder_config()
+            
+            # Set precision
+            if use_fp16:
+                config.set_flag(trt.BuilderFlag.FP16)
+                log(f"Enabled FP16 precision for {clip_type}", "DEBUG", True)
+            
+            # Set memory pool
+            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, memory_pool_bytes)
+            
+            # Enable optimizations
+            config.set_flag(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+            config.set_flag(trt.BuilderFlag.OBEY_PRECISION_CONSTRAINTS)
+            
+            # Add optimization profile for dynamic batch size
+            profile = builder.create_optimization_profile()
+            profile.set_shape(
+                'input_ids',
+                (prompt_batch_min, 77),
+                (prompt_batch_opt, 77), 
+                (prompt_batch_max, 77)
+            )
+            config.add_optimization_profile(profile)
+            
+            # Build engine with timing
+            log(f"Building {clip_type} TensorRT engine with improved settings...", "INFO", True)
+            build_start_time = time.time()
+            
+            serialized_engine = builder.build_serialized_network(network, config)
+            if serialized_engine is None:
+                raise RuntimeError(f"Failed to build TensorRT engine for {clip_type}")
+            
+            build_time = time.time() - build_start_time
+            log(f"{clip_type} TensorRT build completed in {build_time:.1f} seconds", "INFO", True)
+            
+            # Save engine
+            with open(engine_path, 'wb') as f:
+                f.write(serialized_engine)
+            
+            engine_size = os.path.getsize(engine_path) / (1024*1024)
+            log(f"{clip_type} engine saved: {os.path.basename(engine_path)} ({engine_size:.1f}MB)", "INFO", True)
+            
+        except Exception as e:
+            log_error_with_traceback(f"Failed to convert {clip_type} ONNX to TensorRT using Optimum method", e)
+            raise
+
 # TensorRT CLIP nodes - exported via __init__.py
