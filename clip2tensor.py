@@ -439,7 +439,7 @@ class DualCLIPToTensorRT:
             raise
     
     def _create_clip_l_model(self):
-        """Create CLIP-L model structure (placeholder)"""
+        """Create CLIP-L model structure (ONNX-compatible placeholder)"""
         import torch.nn as nn
         
         class CLIPLModel(nn.Module):
@@ -447,23 +447,47 @@ class DualCLIPToTensorRT:
                 super().__init__()
                 self.token_embedding = nn.Embedding(49408, 768)  # vocab_size, hidden_dim
                 self.positional_embedding = nn.Parameter(torch.zeros(77, 768))
-                self.transformer = nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(768, 12, 3072, batch_first=True),
-                    num_layers=12
-                )
+                
+                # Very simple ONNX-compatible layers (no attention to avoid ONNX issues)
+                self.linear1 = nn.Linear(768, 3072)
+                self.activation = nn.ReLU()  # Use ReLU instead of GELU for better ONNX compatibility
+                self.linear2 = nn.Linear(3072, 768)
+                self.linear3 = nn.Linear(768, 768)  # Additional processing layer
+                self.ln1 = nn.LayerNorm(768)
+                self.ln2 = nn.LayerNorm(768)
                 self.ln_final = nn.LayerNorm(768)
+                self.dropout = nn.Dropout(0.1)
                 
             def forward(self, input_ids):
+                # Embedding + positional encoding
                 x = self.token_embedding(input_ids)
                 x = x + self.positional_embedding
-                x = self.transformer(x)
+                
+                # Simple feed-forward processing (no attention)
+                # Layer 1: FFN + residual
+                residual = x
+                x = self.ln1(x)
+                x = self.linear1(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                x = self.linear2(x)
+                x = residual + x
+                
+                # Layer 2: Additional processing
+                residual = x
+                x = self.ln2(x)
+                x = self.linear3(x)
+                x = self.activation(x)
+                x = residual + x
+                
+                # Final layer norm
                 x = self.ln_final(x)
                 return x
         
         return CLIPLModel()
     
     def _create_clip_g_model(self):
-        """Create CLIP-G model structure (placeholder)"""
+        """Create CLIP-G model structure (ONNX-compatible placeholder)"""
         import torch.nn as nn
         
         class CLIPGModel(nn.Module):
@@ -471,16 +495,40 @@ class DualCLIPToTensorRT:
                 super().__init__()
                 self.token_embedding = nn.Embedding(49408, 1280)  # vocab_size, hidden_dim
                 self.positional_embedding = nn.Parameter(torch.zeros(77, 1280))
-                self.transformer = nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(1280, 20, 5120, batch_first=True),
-                    num_layers=32
-                )
+                
+                # Very simple ONNX-compatible layers (no attention to avoid ONNX issues)
+                self.linear1 = nn.Linear(1280, 5120)
+                self.activation = nn.ReLU()  # Use ReLU instead of GELU for better ONNX compatibility
+                self.linear2 = nn.Linear(5120, 1280)
+                self.linear3 = nn.Linear(1280, 1280)  # Additional processing layer
+                self.ln1 = nn.LayerNorm(1280)
+                self.ln2 = nn.LayerNorm(1280)
                 self.ln_final = nn.LayerNorm(1280)
+                self.dropout = nn.Dropout(0.1)
                 
             def forward(self, input_ids):
+                # Embedding + positional encoding
                 x = self.token_embedding(input_ids)
                 x = x + self.positional_embedding
-                x = self.transformer(x)
+                
+                # Simple feed-forward processing (no attention)
+                # Layer 1: FFN + residual
+                residual = x
+                x = self.ln1(x)
+                x = self.linear1(x)
+                x = self.activation(x)
+                x = self.dropout(x)
+                x = self.linear2(x)
+                x = residual + x
+                
+                # Layer 2: Additional processing
+                residual = x
+                x = self.ln2(x)
+                x = self.linear3(x)
+                x = self.activation(x)
+                x = residual + x
+                
+                # Final layer norm
                 x = self.ln_final(x)
                 return x
         
@@ -502,20 +550,79 @@ class DualCLIPToTensorRT:
             model.eval()
             dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long)
             
-            torch.onnx.export(
-                model,
-                dummy_input,
-                onnx_path,
-                export_params=True,
-                opset_version=17,
-                do_constant_folding=True,
-                input_names=['input_ids'],
-                output_names=['text_embeddings'],
-                dynamic_axes={
-                    'input_ids': {0: 'batch_size'},
-                    'text_embeddings': {0: 'batch_size'}
-                }
-            )
+            # Try multiple ONNX export configurations for compatibility
+            export_success = False
+            
+            # Configuration 1: ONNX opset 16 (more compatible with ONNX 1.16.x)
+            try:
+                log(f"Attempting ONNX export with opset 16...", "DEBUG", True)
+                torch.onnx.export(
+                    model,
+                    dummy_input,
+                    onnx_path,
+                    export_params=True,
+                    opset_version=16,
+                    do_constant_folding=True,
+                    input_names=['input_ids'],
+                    output_names=['text_embeddings'],
+                    dynamic_axes={
+                        'input_ids': {0: 'batch_size'},
+                        'text_embeddings': {0: 'batch_size'}
+                    }
+                )
+                export_success = True
+                log(f"ONNX export successful with opset 16", "DEBUG", True)
+            except Exception as e:
+                log(f"ONNX export failed with opset 16: {str(e)}", "DEBUG", True)
+            
+            # Configuration 2: ONNX opset 14 (fallback)
+            if not export_success:
+                try:
+                    log(f"Attempting ONNX export with opset 14...", "DEBUG", True)
+                    torch.onnx.export(
+                        model,
+                        dummy_input,
+                        onnx_path,
+                        export_params=True,
+                        opset_version=14,
+                        do_constant_folding=True,
+                        input_names=['input_ids'],
+                        output_names=['text_embeddings'],
+                        dynamic_axes={
+                            'input_ids': {0: 'batch_size'},
+                            'text_embeddings': {0: 'batch_size'}
+                        }
+                    )
+                    export_success = True
+                    log(f"ONNX export successful with opset 14", "DEBUG", True)
+                except Exception as e:
+                    log(f"ONNX export failed with opset 14: {str(e)}", "DEBUG", True)
+            
+            # Configuration 3: ONNX opset 11 (maximum compatibility)
+            if not export_success:
+                try:
+                    log(f"Attempting ONNX export with opset 11...", "DEBUG", True)
+                    torch.onnx.export(
+                        model,
+                        dummy_input,
+                        onnx_path,
+                        export_params=True,
+                        opset_version=11,
+                        do_constant_folding=False,  # Disable constant folding for compatibility
+                        input_names=['input_ids'],
+                        output_names=['text_embeddings'],
+                        dynamic_axes={
+                            'input_ids': {0: 'batch_size'},
+                            'text_embeddings': {0: 'batch_size'}
+                        }
+                    )
+                    export_success = True
+                    log(f"ONNX export successful with opset 11", "DEBUG", True)
+                except Exception as e:
+                    log(f"ONNX export failed with opset 11: {str(e)}", "DEBUG", True)
+            
+            if not export_success:
+                raise RuntimeError(f"Failed to export {clip_type} model to ONNX with all opset versions")
             
             log(f"{clip_type} ONNX export completed", "DEBUG", True)
             
