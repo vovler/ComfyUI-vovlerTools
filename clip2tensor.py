@@ -475,6 +475,7 @@ class DualCLIPToTensorRT:
             except Exception as e:
                 log(f"CLIP-G wrapper test failed: {str(e)}", "ERROR", True)
             
+            clip_type = 'clip-g'
             # Test the model wrapper first
             log(f"Testing {clip_type} wrapper before ONNX export...", "DEBUG", True)
             try:
