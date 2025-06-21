@@ -1838,7 +1838,7 @@ class DualCLIPToTensorRTV2:
             }
             
             if clip_type == 'clip-g':
-                dynamic_axes["pooled_output"] = {0: "batch_size"}
+                dynamic_axes["pooler_output"] = {0: "batch_size"}  # Match the output name
             
             # Export using Optimum's ONNX exporter
             from optimum.exporters.onnx import export_models
@@ -1857,25 +1857,51 @@ class DualCLIPToTensorRTV2:
                 library_name="transformers"
             )(model_config) if model_config else None
             
-            if onnx_config is None:
-                log(f"Using manual ONNX export for {clip_type}...", "DEBUG", True)
-                # Fallback to manual export
+            # Always use manual export since Optimum's export_models API is unstable
+            log(f"Using manual ONNX export for {clip_type}...", "DEBUG", True)
+            
+            try:
+                # Try using torch.onnx.export with the HF compatible model
                 self._manual_onnx_export_optimum(hf_model, tokenizer, onnx_path, clip_type, 
                                                 prompt_batch_opt, dynamic_axes)
-            else:
-                log(f"Using Optimum automatic export for {clip_type}...", "DEBUG", True)
-                # Use Optimum's automatic export
-                export_models(
-                    model=hf_model,
-                    config=onnx_config,
-                    tokenizer=tokenizer,
-                    output_dir=temp_dir,
-                    opset=16
-                )
-                # Move the exported model to our expected path
-                exported_path = os.path.join(temp_dir, "model.onnx")
-                if os.path.exists(exported_path):
-                    os.rename(exported_path, onnx_path)
+            except Exception as manual_error:
+                log(f"Manual export failed, trying alternative approach: {str(manual_error)}", "WARNING", True)
+                
+                # Alternative: Try using optimum's main_export function if available
+                try:
+                    from optimum.exporters.onnx import main_export
+                    from pathlib import Path
+                    
+                    # Save the model temporarily for Optimum export
+                    model_dir = os.path.join(temp_dir, "hf_model")
+                    os.makedirs(model_dir, exist_ok=True)
+                    
+                    # Try to save as HF model (this might fail but worth trying)
+                    hf_model.save_pretrained(model_dir)
+                    tokenizer.save_pretrained(model_dir)
+                    
+                    # Use main_export
+                    main_export(
+                        model_name_or_path=model_dir,
+                        output=Path(temp_dir),
+                        task="feature-extraction",
+                        opset=16,
+                        device="cuda",
+                        fp16=use_fp16
+                    )
+                    
+                    # Find the exported model
+                    for file in os.listdir(temp_dir):
+                        if file.endswith('.onnx'):
+                            exported_path = os.path.join(temp_dir, file)
+                            if os.path.exists(exported_path):
+                                os.rename(exported_path, onnx_path)
+                                break
+                    
+                except Exception as optimum_error:
+                    log(f"Optimum export also failed: {str(optimum_error)}", "WARNING", True)
+                    # Final fallback - re-raise the original manual export error
+                    raise manual_error
             
             # Validate ONNX model
             if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
@@ -1969,7 +1995,13 @@ class DualCLIPToTensorRTV2:
             
             def forward(self, input_ids, attention_mask=None, **kwargs):
                 # Call the original model
-                outputs = self.clip_model(input_tokens=input_ids)
+                try:
+                    # Try with input_tokens first (ComfyUI style)
+                    outputs = self.clip_model(input_tokens=input_ids)
+                except Exception as e:
+                    # Fallback to input_ids if input_tokens doesn't work
+                    log(f"Trying fallback forward method for {self.clip_type}: {str(e)}", "DEBUG", True)
+                    outputs = self.clip_model(input_ids)
                 
                 if self.clip_type == 'clip-l':
                     # CLIP-L only returns sequence output
@@ -1994,17 +2026,44 @@ class DualCLIPToTensorRTV2:
         """Manual ONNX export with Optimum-style configuration"""
         
         try:
+            # Determine device - try to get from model, fallback to cuda
+            try:
+                device = next(model.clip_model.parameters()).device
+            except:
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            log(f"Using device {device} for {clip_type} ONNX export", "DEBUG", True)
+            
             # Create dummy input
-            dummy_input = torch.randint(0, 49408, (batch_size, 77), dtype=torch.long, device=model.clip_model.device)
+            dummy_input = torch.randint(0, 49408, (batch_size, 77), dtype=torch.long, device=device)
             
             # Define output names
             if clip_type == 'clip-g':
-                output_names = ['last_hidden_state', 'pooled_output']
+                output_names = ['last_hidden_state', 'pooler_output']  # Note: using pooler_output instead of pooled_output
             else:
                 output_names = ['last_hidden_state']
             
-            # Export with improved settings
+            # Make sure model is on the same device as input
+            model = model.to(device)
             model.eval()
+            
+            # Test the model first to make sure it works
+            log(f"Testing {clip_type} model before ONNX export...", "DEBUG", True)
+            with torch.no_grad():
+                test_output = model(dummy_input)
+                if clip_type == 'clip-g':
+                    log(f"Test output types: last_hidden_state={type(test_output.last_hidden_state)}, pooler_output={type(test_output.pooler_output)}", "DEBUG", True)
+                    if hasattr(test_output, 'last_hidden_state') and test_output.last_hidden_state is not None:
+                        log(f"last_hidden_state shape: {test_output.last_hidden_state.shape}", "DEBUG", True)
+                    if hasattr(test_output, 'pooler_output') and test_output.pooler_output is not None:
+                        log(f"pooler_output shape: {test_output.pooler_output.shape}", "DEBUG", True)
+                else:
+                    log(f"Test output type: {type(test_output.last_hidden_state)}", "DEBUG", True)
+                    if hasattr(test_output, 'last_hidden_state') and test_output.last_hidden_state is not None:
+                        log(f"last_hidden_state shape: {test_output.last_hidden_state.shape}", "DEBUG", True)
+            
+            # Export with improved settings
+            log(f"Starting ONNX export for {clip_type}...", "DEBUG", True)
             with torch.no_grad():
                 torch.onnx.export(
                     model,
@@ -2022,6 +2081,13 @@ class DualCLIPToTensorRTV2:
                 )
             
             log(f"Manual ONNX export completed for {clip_type}", "DEBUG", True)
+            
+            # Validate exported file
+            if not os.path.exists(onnx_path):
+                raise RuntimeError(f"ONNX file was not created: {onnx_path}")
+            
+            file_size = os.path.getsize(onnx_path) / (1024*1024)
+            log(f"Exported ONNX file size: {file_size:.1f}MB", "DEBUG", True)
             
         except Exception as e:
             log_error_with_traceback(f"Manual ONNX export failed for {clip_type}", e)
