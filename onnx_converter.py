@@ -85,7 +85,7 @@ class SDXLDirectoryToOnnx:
 
     @classmethod
     def INPUT_TYPES(cls):
-        diffusers_path = os.path.join(folder_paths.get_base_path(), "models", "diffusers")
+        diffusers_path = os.path.join(folder_paths.base_path, "models", "diffusers")
         os.makedirs(diffusers_path, exist_ok=True)
         model_dirs = [d for d in os.listdir(diffusers_path) if os.path.isdir(os.path.join(diffusers_path, d))]
         
