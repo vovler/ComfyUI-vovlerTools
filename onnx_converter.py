@@ -63,47 +63,34 @@ class SDXLClipToOnnx:
 
         try:
             print(f"[INFO] comfy_onnx_exporter: Reconstructing HuggingFace model for {model_key}...")
-            
+
             # --- MODEL RECONSTRUCTION ---
             # Create the correct HuggingFace config for the target model.
             if model_key == "clip_l":
-                # Config for OpenAI CLIP-L/14
-                config = CLIPTextConfig(
-                    hidden_size=768,
-                    intermediate_size=3072,
-                    num_attention_heads=12,
-                    num_hidden_layers=12,
-                    projection_dim=768,
-                    vocab_size=49408,
-                    max_position_embeddings=77,
-                    hidden_act="quick_gelu",
-                )
+                config = CLIPTextConfig(hidden_size=768, intermediate_size=3072, num_attention_heads=12, num_hidden_layers=12, projection_dim=768, vocab_size=49408, max_position_embeddings=77, hidden_act="quick_gelu")
             elif model_key == "clip_g":
-                # Config for OpenCLIP-bigG/14
-                config = CLIPTextConfig(
-                    hidden_size=1280,
-                    intermediate_size=5120,
-                    num_attention_heads=20,
-                    num_hidden_layers=32,
-                    projection_dim=1280,
-                    vocab_size=49408,
-                    max_position_embeddings=77,
-                    hidden_act="gelu",
-                )
+                config = CLIPTextConfig(hidden_size=1280, intermediate_size=5120, num_attention_heads=20, num_hidden_layers=32, projection_dim=1280, vocab_size=49408, max_position_embeddings=77, hidden_act="gelu")
             else:
                 raise ValueError(f"Unknown model_key: {model_key}")
 
-            # Extract the state dictionary (weights) from the ComfyUI CLIP object.
-            # This is the most crucial part of the fix.
-            comfy_transformer_model = clip_object.cond_stage_model.clip.transformer
-            state_dict = comfy_transformer_model.state_dict()
+            # ** CORRECTED ACCESS LOGIC **
+            # 1. Get the top-level wrapper model (e.g., SD1ClipModel)
+            model_wrapper = clip_object.cond_stage_model
+            # 2. Use the '.clip' attribute (e.g., "clip_l") to get the inner model (e.g., SD1CheckpointClipModel)
+            inner_model = getattr(model_wrapper, model_wrapper.clip)
+            # 3. Get the transformer, which is the actual torch module with weights
+            comfy_transformer = inner_model.transformer
+            state_dict = comfy_transformer.state_dict()
             
-            # Create a new, standard HuggingFace model from our config and load the weights.
+            # 4. Create a new, standard HuggingFace model and load the weights.
             pytorch_model = CLIPTextModelWithProjection(config)
             pytorch_model.load_state_dict(state_dict)
             
-            # Extract the tokenizer.
-            tokenizer = clip_object.tokenizer.clip.tokenizer
+            # 5. Get the tokenizer using the same logic.
+            tokenizer_wrapper = clip_object.tokenizer
+            inner_tokenizer = getattr(tokenizer_wrapper, tokenizer_wrapper.clip)
+            tokenizer = inner_tokenizer.tokenizer
+            
             print(f"[INFO] comfy_onnx_exporter: Model reconstruction successful.")
 
         except Exception as e:
@@ -115,28 +102,23 @@ class SDXLClipToOnnx:
         with tempfile.TemporaryDirectory() as tmpdir:
             print(f"[INFO] comfy_onnx_exporter: Saving temporary HuggingFace model to {tmpdir}")
             
-            # Now this will work because `pytorch_model` is a genuine transformers.PreTrainedModel
+            # This now works because `pytorch_model` is a genuine transformers.PreTrainedModel
             pytorch_model.save_pretrained(tmpdir)
             tokenizer.save_pretrained(tmpdir)
 
             try:
-                # 1. Export to ONNX
+                # Export and Optimize
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                 export(model_name_or_path=tmpdir, output=tmpdir, task="feature-extraction")
 
-                # 2. Create optimizer
                 optimizer = ORTOptimizer.from_pretrained(tmpdir)
-                
-                # 3. Define optimization config
                 optimization_config = OptimizationConfig(optimization_level=optimization_level, fp16=use_fp16)
                 
-                # 4. Optimize the model and save to a second temp dir
                 with tempfile.TemporaryDirectory() as tmpdir_optimized:
                     device_used = "GPU" if self.gpu_available else "CPU"
                     print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
                     optimizer.optimize(save_dir=tmpdir_optimized, optimization_config=optimization_config)
 
-                    # 5. Move the final single .onnx file to its destination
                     optimized_model_file = os.path.join(tmpdir_optimized, 'model.onnx')
                     shutil.move(optimized_model_file, final_onnx_path)
 
