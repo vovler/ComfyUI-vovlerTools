@@ -50,10 +50,8 @@ class SDXLClipToOnnx:
         """
         Handles the conversion of a single CLIP model file and saves it as a single .onnx file.
         """
-        # The final destination for the single .onnx file
         final_onnx_path = os.path.join(output_dir, f"{model_key}.onnx")
         
-        # The source directory containing the .safetensors and config.json
         source_model_path = folder_paths.get_full_path("clip", clip_filename)
         if not source_model_path:
              print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find model {clip_filename}. Please ensure it's in a ComfyUI 'clip' model directory.\033[0m")
@@ -68,38 +66,31 @@ class SDXLClipToOnnx:
         print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {final_onnx_path}")
 
         try:
-            # Temporary directory for the intermediate ONNX model files
             with tempfile.TemporaryDirectory() as tmpdir:
-                # 1. Export the model directly from its source directory to the temp directory
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                 
                 main_export(
                     model_name_or_path=source_model_dir,
                     output=tmpdir,
                     task="feature-extraction",
-                    no_post_process=True # We will do our own optimization.
+                    # CORRECTED: Explicitly tell optimum that the source is a PyTorch model.
+                    framework="pt",
+                    no_post_process=True
                 )
 
-                # 2. Create an optimizer for the exported model in the temp directory
                 optimizer = ORTOptimizer.from_pretrained(tmpdir)
-                
-                # 3. Define the optimization configuration
                 optimization_config = OptimizationConfig(
                     optimization_level=optimization_level,
                     fp16=use_fp16
                 )
                 
-                # 4. Optimize the model and save to a second temp directory
                 with tempfile.TemporaryDirectory() as tmpdir_optimized:
                     device_used = "GPU" if self.gpu_available else "CPU"
                     print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
                     
                     optimizer.optimize(save_dir=tmpdir_optimized, optimization_config=optimization_config)
 
-                    # 5. The final optimized ONNX file is located inside the second temp directory
                     optimized_model_file = os.path.join(tmpdir_optimized, 'model.onnx')
-
-                    # 6. Move the single .onnx file to its final destination
                     shutil.move(optimized_model_file, final_onnx_path)
 
                     print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_key} to:\n{final_onnx_path}\033[0m")
@@ -109,11 +100,9 @@ class SDXLClipToOnnx:
             traceback.print_exc()
 
     def export_clips_to_onnx(self, clip_l_name, clip_g_name, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
-        # CORRECTED: Explicitly construct the path to ComfyUI/models/clip/
         output_clip_dir = os.path.join(folder_paths.base_path, "models", "clip")
         os.makedirs(output_clip_dir, exist_ok=True)
         
-        # Run the export process for each selected clip file
         self.export_single_clip(clip_l_name, "clip_l", output_clip_dir, optimization_level, use_fp16)
         self.export_single_clip(clip_g_name, "clip_g", output_clip_dir, optimization_level, use_fp16)
         
