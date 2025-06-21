@@ -1,5 +1,5 @@
 from .wd14tagger import WD14TaggerAndImageFilterer, WD14TensorRTModelLoader, WDTaggerONNXtoTENSORRT, WD14BlackListLoader
-from .clip2tensor import DualCLIPToTensorRT, DualCLIPTensorRTLoader, DualCLIPTensorRTTextEncode
+from .clip2tensor import DualCLIPToTensorRT
 
 NODE_CLASS_MAPPINGS = {
     "WD14TaggerAndImageFilterer": WD14TaggerAndImageFilterer,
@@ -15,5 +15,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WDTaggerONNXtoTENSORRT": "WD14 ONNX to TensorRT Converter 🚀",
     "WD14BlackListLoader": "WD14 BlackList Loader 🚫",
     "DualCLIPToTensorRT": "Dual CLIP to TensorRT Converter 🔄⚡",
+}
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
