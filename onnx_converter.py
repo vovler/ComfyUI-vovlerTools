@@ -3,7 +3,6 @@ import folder_paths
 import tempfile
 import shutil
 import traceback
-import diffusers
 # Required imports
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
