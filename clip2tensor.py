@@ -351,18 +351,30 @@ class DualCLIPToTensorRT:
                 log(f"TensorRT version: {trt.__version__}", "INFO", True)
                 log(f"TensorRT builder created successfully", "DEBUG", True)
                 
-                # Check builder capabilities
-                log(f"Builder max batch size: {builder.max_batch_size}", "DEBUG", True)
-                log(f"Platform has fast FP16: {builder.platform_has_fast_fp16}", "DEBUG", True)
-                log(f"Platform has fast INT8: {builder.platform_has_fast_int8}", "DEBUG", True)
+                # Check builder capabilities (TensorRT 10.x compatible)
+                try:
+                    log(f"Platform has fast FP16: {builder.platform_has_fast_fp16}", "DEBUG", True)
+                except AttributeError:
+                    log("Platform FP16 support check not available in this TensorRT version", "DEBUG", True)
+                
+                try:
+                    log(f"Platform has fast INT8: {builder.platform_has_fast_int8}", "DEBUG", True)
+                except AttributeError:
+                    log("Platform INT8 support check not available in this TensorRT version", "DEBUG", True)
+                
+                # Note: max_batch_size was removed in TensorRT 10.x (deprecated with explicit batch mode)
+                log("TensorRT builder capabilities checked (TensorRT 10.x)", "DEBUG", True)
                 
             except Exception as builder_error:
                 log_error_with_traceback("Failed to create TensorRT builder", builder_error)
                 raise
             
-            # Check TensorRT capabilities
-            if not builder.platform_has_fast_fp16:
-                log("Warning: Platform does not report fast FP16 support, but proceeding anyway", "WARNING", True)
+            # Check TensorRT capabilities (TensorRT 10.x compatible)
+            try:
+                if not builder.platform_has_fast_fp16:
+                    log("Warning: Platform does not report fast FP16 support, but proceeding anyway", "WARNING", True)
+            except AttributeError:
+                log("FP16 capability check not available in TensorRT 10.x, assuming supported", "DEBUG", True)
             
             # Create network with explicit batch
             log("Creating TensorRT network...", "DEBUG", True)
