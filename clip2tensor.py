@@ -343,6 +343,7 @@ class DualCLIPToTensorRT:
             
             clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
             log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
+            log(f"[DEBUG] CLIP-L transformer type: {type(clip_l_model)}", "DEBUG", True)
 
             clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
             log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
@@ -351,8 +352,8 @@ class DualCLIPToTensorRT:
             # Move models to GPU for conversion
             device = 'cuda'
             log(f"Moving models to '{device}' for ONNX export...", "INFO", True)
-            clip_l_model.to(device)
-            clip_g_model.to(device)
+            clip_l_model = clip_l_model.to(device)
+            clip_g_model = clip_g_model.to(device)
 
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
@@ -376,20 +377,7 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
-                    log(f"[CLIP_G_Wrapper] Input shape: {input_ids.shape}, dtype: {input_ids.dtype}", "DEBUG", True)
                     outputs = self.clip_g(input_tokens=input_ids)
-                    log(f"[CLIP_G_Wrapper] Raw outputs type: {type(outputs)}", "DEBUG", True)
-                    if isinstance(outputs, (list, tuple)):
-                        log(f"[CLIP_G_Wrapper] Raw outputs length: {len(outputs)}", "DEBUG", True)
-                        for i, out in enumerate(outputs):
-                            if torch.is_tensor(out):
-                                log(f"[CLIP_G_Wrapper] Output {i} shape: {out.shape}, dtype: {out.dtype}", "DEBUG", True)
-                            elif out is None:
-                                log(f"[CLIP_G_Wrapper] Output {i} is None", "DEBUG", True)
-                            else:
-                                log(f"[CLIP_G_Wrapper] Output {i} type: {type(out)}", "DEBUG", True)
-                    else:
-                        log(f"[CLIP_G_Wrapper] Raw outputs not a tuple/list: {type(outputs)}", "DEBUG", True)
                     return outputs[0], outputs[2]
 
 
@@ -475,91 +463,6 @@ class DualCLIPToTensorRT:
             
             raise
 
-    def _create_clip_wrapper(self, transformer, clip_type):
-        """Create an ONNX-exportable wrapper around ComfyUI's CLIP transformer"""
-        import torch
-        import torch.nn as nn
-        
-        class CLIPWrapper(nn.Module):
-            def __init__(self, transformer, clip_type):
-                super().__init__()
-                self.transformer = transformer
-                self.clip_type = clip_type
-                
-                # Get the token embedding and positional embedding from the transformer
-                if hasattr(transformer, 'embeddings'):
-                    # Standard CLIP structure
-                    self.token_embedding = transformer.embeddings.token_embedding
-                    self.positional_embedding = transformer.embeddings.position_embedding.weight
-                elif hasattr(transformer, 'token_embedding'):
-                    # Direct access
-                    self.token_embedding = transformer.token_embedding
-                    self.positional_embedding = transformer.positional_embedding
-                else:
-                    # Try to find embeddings in the model
-                    for name, module in transformer.named_modules():
-                        if 'token_embedding' in name or 'word_embeddings' in name:
-                            self.token_embedding = module
-                            break
-                    
-                    # Get positional embeddings
-                    if hasattr(transformer, 'positional_embedding'):
-                        self.positional_embedding = transformer.positional_embedding
-                    else:
-                        # Create dummy positional embeddings
-                        embed_dim = 768 if clip_type == 'clip-l' else 1280
-                        self.positional_embedding = nn.Parameter(torch.zeros(77, embed_dim))
-                
-                # Store the actual transformer layers
-                self.encoder_layers = None
-                if hasattr(transformer, 'encoder'):
-                    self.encoder_layers = transformer.encoder
-                elif hasattr(transformer, 'layers'):
-                    self.encoder_layers = transformer.layers
-                
-                # Final layer norm
-                self.final_layer_norm = None
-                if hasattr(transformer, 'final_layer_norm'):
-                    self.final_layer_norm = transformer.final_layer_norm
-                elif hasattr(transformer, 'ln_final'):
-                    self.final_layer_norm = transformer.ln_final
-                
-            def forward(self, input_ids):
-                # Simple forward pass that mimics CLIP text encoder
-                # Embed tokens
-                token_embeds = self.token_embedding(input_ids)
-                
-                # Add positional embeddings
-                seq_len = token_embeds.size(1)
-                pos_embeds = self.positional_embedding[:seq_len]
-                embeddings = token_embeds + pos_embeds
-                
-                # Pass through encoder if available
-                if self.encoder_layers is not None:
-                    hidden_states = self.encoder_layers(embeddings)
-                else:
-                    hidden_states = embeddings
-                
-                # Apply final layer norm if available
-                if self.final_layer_norm is not None:
-                    hidden_states = self.final_layer_norm(hidden_states)
-                
-                if self.clip_type == 'clip-g':
-                    # For CLIP-G, return both sequence output and pooled output
-                    # Use the embedding of the first token (CLS token) as pooled output
-                    pooled_output = hidden_states[:, 0]
-                    return hidden_states, pooled_output
-                else:
-                    # For CLIP-L, just return the sequence output
-                    return hidden_states
-        
-        wrapper = CLIPWrapper(transformer, clip_type)
-        wrapper.eval()
-        return wrapper
- 
-      
-  
-    
     def _create_single_clip_engine(self, model, engine_path, clip_type, 
                                  prompt_batch_min, prompt_batch_opt, prompt_batch_max):
         """
@@ -580,12 +483,6 @@ class DualCLIPToTensorRT:
             
             # Single ONNX export attempt - no fallbacks
             log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
-            if clip_type == 'clip-g':
-                try:
-                    log(f"[DEBUG] CLIP-G Wrapper model passed to ONNX export: {type(model)}", "DEBUG", True)
-                    log(f"[DEBUG] CLIP-G model device: {next(model.parameters()).device}", "DEBUG", True)
-                except Exception as e:
-                    log(f"[DEBUG] Could not get model device: {e}", "WARNING", True)
             
             # Define the output names based on the clip type
             if clip_type == 'clip-g':
@@ -619,9 +516,6 @@ class DualCLIPToTensorRT:
             )
             
             log(f"{clip_type} ONNX export completed", "DEBUG", True)
-            if os.path.exists(onnx_path):
-                onnx_size_mb = os.path.getsize(onnx_path) / (1024*1024)
-                log(f"Post-export ONNX file size for {clip_type}: {onnx_size_mb:.2f} MB", "INFO", True)
 
             # Validate ONNX file before proceeding
             if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
