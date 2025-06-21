@@ -425,22 +425,20 @@ class DualCLIPToTensorRT:
             # Create separate engines for each CLIP model
             log("Creating separate TensorRT engines for CLIP-L and CLIP-G", "INFO", True)
             
-
-
             # Test the models first to debug the outputs
             log("Testing CLIP model outputs for debugging...", "DEBUG", True)
             test_input = torch.randint(0, 49408, (1, 77), dtype=torch.long, device=device)
             
-            #try:
-             #   clip_l_outputs = clip_l_model(input_tokens=test_input)
-             #   log(f"CLIP-L raw outputs: {len(clip_l_outputs)} items", "DEBUG", True)
-             #   for i, output in enumerate(clip_l_outputs):
-             #       if output is not None:
-             #           log(f"CLIP-L output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
-             #       else:
-             #           log(f"CLIP-L output[{i}]: None", "DEBUG", True)
-            #except Exception as e:
-            #    log(f"CLIP-L test failed: {str(e)}", "ERROR", True)
+            try:
+                clip_l_outputs = clip_l_model(input_tokens=test_input)
+                log(f"CLIP-L raw outputs: {len(clip_l_outputs)} items", "DEBUG", True)
+                for i, output in enumerate(clip_l_outputs):
+                    if output is not None:
+                        log(f"CLIP-L output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
+                    else:
+                        log(f"CLIP-L output[{i}]: None", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-L test failed: {str(e)}", "ERROR", True)
             
             try:
                 clip_g_outputs = clip_g_model(input_tokens=test_input)
@@ -455,14 +453,14 @@ class DualCLIPToTensorRT:
             
             # Test the wrappers before ONNX export
             log("Testing wrapper outputs...", "DEBUG", True)
-            #clip_l_wrapper = CLIP_L_Wrapper(clip_l_model)
+            clip_l_wrapper = CLIP_L_Wrapper(clip_l_model)
             clip_g_wrapper = CLIP_G_Wrapper(clip_g_model)
             
-            #try:
-            #    clip_l_wrapper_out = clip_l_wrapper(test_input)
-            #    log(f"CLIP-L wrapper output shape: {clip_l_wrapper_out.shape}", "DEBUG", True)
-            #except Exception as e:
-            #    log(f"CLIP-L wrapper test failed: {str(e)}", "ERROR", True)
+            try:
+                clip_l_wrapper_out = clip_l_wrapper(test_input)
+                log(f"CLIP-L wrapper output shape: {clip_l_wrapper_out.shape}", "DEBUG", True)
+            except Exception as e:
+                log(f"CLIP-L wrapper test failed: {str(e)}", "ERROR", True)
             
             try:
                 clip_g_wrapper_out = clip_g_wrapper(test_input)
@@ -475,7 +473,122 @@ class DualCLIPToTensorRT:
             except Exception as e:
                 log(f"CLIP-G wrapper test failed: {str(e)}", "ERROR", True)
             
-            clip_type = 'clip-g'
+            # Create engine file paths for both models
+            clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
+            clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
+            
+            # Create CLIP-L engine
+            #log("Creating CLIP-L TensorRT engine...", "INFO", True)
+            #self._create_single_clip_engine(
+            #    clip_l_wrapper, 
+            #    clip_l_engine_path, 
+            #    'clip-l',
+            #    prompt_batch_min, 
+            #    prompt_batch_opt, 
+            #    prompt_batch_max
+            #)
+            
+            # Create CLIP-G engine  
+            log("Creating CLIP-G TensorRT engine...", "INFO", True)
+            self._create_single_clip_engine(
+                clip_g_wrapper, 
+                clip_g_engine_path, 
+                'clip-g',
+                prompt_batch_min, 
+                prompt_batch_opt, 
+                prompt_batch_max
+            )
+            
+            # Success message
+            clip_l_size = os.path.getsize(clip_l_engine_path) / (1024*1024)
+            clip_g_size = os.path.getsize(clip_g_engine_path) / (1024*1024)
+            success_msg = f"Dual CLIP TensorRT engines created successfully:\n"
+            success_msg += f"  - CLIP-L: {os.path.basename(clip_l_engine_path)} ({clip_l_size:.1f}MB)\n" 
+            success_msg += f"  - CLIP-G: {os.path.basename(clip_g_engine_path)} ({clip_g_size:.1f}MB)"
+            
+            log(success_msg, "INFO", True)
+            return (success_msg,)
+            
+        except MemoryError as e:
+            error_msg = "Out of memory during TensorRT conversion. Try reducing batch sizes or closing other applications."
+            log_error_with_traceback(error_msg, e)
+            log(f"Suggested action: Reduce prompt_batch_max from {prompt_batch_max} to {max(1, prompt_batch_max // 2)}", "INFO", True)
+            return (error_msg,)
+            
+        except PermissionError as e:
+            error_msg = "Permission denied during TensorRT conversion. Check file/directory permissions."
+            log_error_with_traceback(error_msg, e)
+            return (error_msg,)
+            
+        except Exception as e:
+            error_msg = f"Error during dual CLIP to TensorRT conversion: {str(e)}"
+            log_error_with_traceback(error_msg, e)
+            
+            # Clean up any partial engine files on failure
+            if clip_l_engine_path and os.path.exists(clip_l_engine_path):
+                try:
+                    os.remove(clip_l_engine_path)
+                    log(f"Cleaned up partial CLIP-L engine file", "DEBUG", True)
+                except:
+                    pass
+            
+            if clip_g_engine_path and os.path.exists(clip_g_engine_path):
+                try:
+                    os.remove(clip_g_engine_path)
+                    log(f"Cleaned up partial CLIP-G engine file", "DEBUG", True)
+                except:
+                    pass
+            
+            # Provide helpful suggestions based on error type
+            if "CUDA" in str(e):
+                log("Suggestion: Check CUDA installation and GPU availability", "INFO", True)
+            elif "TensorRT" in str(e):
+                log("Suggestion: Check TensorRT installation and compatibility", "INFO", True)
+            elif "memory" in str(e).lower():
+                log("Suggestion: Reduce batch sizes or free up GPU memory", "INFO", True)
+            
+            return (error_msg,)
+
+    def _create_single_clip_engine(self, model, engine_path, clip_type, 
+                                 prompt_batch_min, prompt_batch_opt, prompt_batch_max):
+        """
+        Create TensorRT engine for a single CLIP model
+        Uses PyTorch -> ONNX -> TensorRT workflow
+        """
+        onnx_path = None
+        original_backends = None
+        try:
+            log(f"Creating {clip_type} TensorRT engine...", "INFO", True)
+            
+            # Step 1: Export to ONNX
+            onnx_path = engine_path.replace('.engine', '.onnx')
+            log(f"Exporting {clip_type} to ONNX: {os.path.basename(onnx_path)}", "DEBUG", True)
+            
+            model.eval()
+            device = next(model.parameters()).device
+            dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long, device=device)
+            
+            # Define the output names based on the clip type
+            if clip_type == 'clip-g':
+                # CLIP-G needs both outputs for SDXL
+                output_names = ['last_hidden_state', 'pooled_output']
+                dynamic_axes_outputs = {
+                    'last_hidden_state': {0: 'batch_size'},
+                    'pooled_output': {0: 'batch_size'}
+                }
+                model_args = (dummy_input,)
+            else:  # clip-l
+                output_names = ['last_hidden_state']
+                dynamic_axes_outputs = {
+                    'last_hidden_state': {0: 'batch_size'}
+                }
+                model_args = (dummy_input,)
+            
+            log(f"ONNX export config for {clip_type}:", "DEBUG", True)
+            log(f"  - Model args: {[arg.shape for arg in model_args]}", "DEBUG", True)
+            log(f"  - Output names: {output_names}", "DEBUG", True)
+            log(f"  - Dynamic axes: {{'input_ids': {{0: 'batch_size'}}, **{dynamic_axes_outputs}}}", "DEBUG", True)
+            
             # Test the model wrapper first
             log(f"Testing {clip_type} wrapper before ONNX export...", "DEBUG", True)
             try:
@@ -491,7 +604,6 @@ class DualCLIPToTensorRT:
                 raise RuntimeError(f"Wrapper test failed for {clip_type}: {str(e)}")
             
             # For CLIP-G, try to disable PyTorch optimizations that might interfere with ONNX export
-            original_backends = None
             if clip_type == 'clip-g':
                 log(f"Disabling PyTorch optimizations for CLIP-G ONNX export...", "DEBUG", True)
                 # Disable optimized attention temporarily
@@ -613,49 +725,16 @@ class DualCLIPToTensorRT:
             
             log(f"{clip_type} TensorRT engine created successfully", "INFO", True)
             
-        except MemoryError as e:
-            error_msg = "Out of memory during TensorRT conversion. Try reducing batch sizes or closing other applications."
-            log_error_with_traceback(error_msg, e)
-            log(f"Suggested action: Reduce prompt_batch_max from {prompt_batch_max} to {max(1, prompt_batch_max // 2)}", "INFO", True)
-            return (error_msg,)
-            
-        except PermissionError as e:
-            error_msg = "Permission denied during TensorRT conversion. Check file/directory permissions."
-            log_error_with_traceback(error_msg, e)
-            return (error_msg,)
-            
         except Exception as e:
-            error_msg = f"Error during dual CLIP to TensorRT conversion: {str(e)}"
-            log_error_with_traceback(error_msg, e)
-            
-            # Clean up any partial engine files on failure
-            if clip_l_engine_path and os.path.exists(clip_l_engine_path):
-                try:
-                    os.remove(clip_l_engine_path)
-                    log(f"Cleaned up partial CLIP-L engine file", "DEBUG", True)
-                except:
-                    pass
-            
-            if clip_g_engine_path and os.path.exists(clip_g_engine_path):
-                try:
-                    os.remove(clip_g_engine_path)
-                    log(f"Cleaned up partial CLIP-G engine file", "DEBUG", True)
-                except:
-                    pass
-            
-            # Provide helpful suggestions based on error type
-            if "CUDA" in str(e):
-                log("Suggestion: Check CUDA installation and GPU availability", "INFO", True)
-            elif "TensorRT" in str(e):
-                log("Suggestion: Check TensorRT installation and compatibility", "INFO", True)
-            elif "memory" in str(e).lower():
-                log("Suggestion: Reduce batch sizes or free up GPU memory", "INFO", True)
-            
-            return (error_msg,)
+            log_error_with_traceback(f"Failed to create {clip_type} TensorRT engine", e)
+            raise
+        finally:
+            # Always clean up ONNX files and restore PyTorch settings
+            if clip_type == 'clip-g' and original_backends is not None:
+                log(f"Restoring PyTorch backend settings...", "DEBUG", True)
+                torch.backends.opt_einsum.enabled = original_backends
+            self._cleanup_temporary_files(onnx_path)
 
-
-
-    
     def _onnx_to_tensorrt(self, onnx_path, engine_path, clip_type,
                          prompt_batch_min, prompt_batch_opt, prompt_batch_max):
         """Convert ONNX model to TensorRT engine - no fallbacks"""
