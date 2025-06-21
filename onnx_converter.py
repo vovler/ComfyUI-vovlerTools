@@ -14,7 +14,8 @@ from optimum.exporters.onnx import export
 class SDXLClipToOnnx:
     """
     A ComfyUI node to export SDXL CLIP-L and CLIP-G models to ONNX format.
-    This version saves the models as single .onnx files in the /models/clip/ directory.
+    This version saves the models as single .onnx files in the /models/clip/ directory
+    and correctly handles nested CLIP model structures.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -43,33 +44,50 @@ class SDXLClipToOnnx:
         else:
             print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
 
-    def export_single_clip(self, clip_model, model_name, clip_base_dir, optimization_level, use_fp16):
+    def export_single_clip(self, clip_object, model_key, clip_base_dir, optimization_level, use_fp16):
         """
         Handles the conversion of a single CLIP model and saves it as a single .onnx file.
+        Navigates the nested structure of custom CLIP wrappers.
         """
-        final_onnx_path = os.path.join(clip_base_dir, f"{model_name}.onnx")
+        final_onnx_path = os.path.join(clip_base_dir, f"{model_key}.onnx")
 
         if os.path.exists(final_onnx_path):
             print(f"[INFO] comfy_onnx_exporter: ONNX model already exists at {final_onnx_path}. Skipping.")
             return
 
-        print(f"\n[INFO] comfy_onnx_exporter: Starting export for {model_name}")
+        print(f"\n[INFO] comfy_onnx_exporter: Starting export for {model_key}")
         print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {final_onnx_path}")
+
+        try:
+            # CORRECTED: Navigate the nested object structure to find the actual model and tokenizer.
+            # 1. Get the main model wrapper (e.g., SD1ClipModel) from the CLIP object.
+            model_wrapper = clip_object.cond_stage_model
+            # 2. Get the inner model object (e.g., SD1CheckpointClipModel) using its key ('clip_l' or 'clip_g').
+            # The name of this key is stored in the wrapper's 'clip' attribute.
+            inner_model_wrapper = getattr(model_wrapper, model_wrapper.clip)
+            # 3. The actual HuggingFace model is the 'transformer' attribute of the inner wrapper.
+            pytorch_model = inner_model_wrapper.transformer
+
+            # Do the same for the tokenizer
+            tokenizer_wrapper = clip_object.tokenizer
+            inner_tokenizer_wrapper = getattr(tokenizer_wrapper, tokenizer_wrapper.clip)
+            tokenizer = inner_tokenizer_wrapper.tokenizer
+
+        except AttributeError as e:
+            print(f"\033[91m[ERROR] comfy_onnx_exporter: Could not find the model or tokenizer in the expected object structure for {model_key}. Please check your CLIP loader. Details: {e}\033[0m")
+            traceback.print_exc()
+            return
 
         # Temporary directory for initial PyTorch -> ONNX export
         with tempfile.TemporaryDirectory() as tmpdir_export:
             print(f"[INFO] comfy_onnx_exporter: Saving temporary HuggingFace model to {tmpdir_export}")
-            
-            # CORRECTED: The actual model is in the 'cond_stage_model' attribute
-            pytorch_model = clip_model.cond_stage_model
-            tokenizer = clip_model.tokenizer
             
             pytorch_model.save_pretrained(tmpdir_export)
             tokenizer.save_pretrained(tmpdir_export)
 
             try:
                 # 1. Export the model to a standard ONNX model inside the temp directory
-                print(f"[INFO] comfy_onnx_exporter: Exporting {model_name} to ONNX format...")
+                print(f"[INFO] comfy_onnx_exporter: Exporting {model_key} to ONNX format...")
                 export(model_name_or_path=tmpdir_export, output=tmpdir_export, task="feature-extraction")
 
                 # 2. Create an optimizer for the exported model
@@ -94,10 +112,10 @@ class SDXLClipToOnnx:
                     # 6. Move just the single .onnx file to the final destination
                     shutil.move(optimized_model_file, final_onnx_path)
 
-                    print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_name} to:\n{final_onnx_path}\033[0m")
+                    print(f"\033[92m[SUCCESS] comfy_onnx_exporter: Successfully exported and optimized {model_key} to:\n{final_onnx_path}\033[0m")
 
             except Exception as e:
-                print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_name}: {e}\033[0m")
+                print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_key}: {e}\033[0m")
                 traceback.print_exc()
 
     def export_clips_to_onnx(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
