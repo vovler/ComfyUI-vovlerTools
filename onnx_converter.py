@@ -3,16 +3,19 @@ import torch
 import folder_paths
 import tempfile
 import shutil
+import traceback
 
+# Direct imports without error catching. If a library is missing,
+# ComfyUI will show a full traceback on startup.
 import onnxruntime
-from optimum.onnxruntime import ORTModelForFeatureExtraction, OptimizationConfig
-from optimum.onnxruntime.optimizer import ORTOptimizer
+from optimum.onnxruntime import ONNXRuntimeOptimizer, OptimizationConfig
 from optimum.exporters.onnx import export
+
 
 class SDXLClipToOnnx:
     """
     A ComfyUI node to export SDXL CLIP-L and CLIP-G models to ONNX format.
-    This version is optimized to detect and use a GPU if available.
+    This version uses the modern Optimum API and is optimized to detect/use a GPU.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -33,23 +36,17 @@ class SDXLClipToOnnx:
     FUNCTION = "export_clips_to_onnx"
     
     def __init__(self):
+        # Check for CUDA provider once upon initialization
         self.gpu_available = False
-       
-        # NEW: Check for CUDA provider once upon initialization
         providers = onnxruntime.get_available_providers()
         if 'CUDAExecutionProvider' in providers:
             self.gpu_available = True
             print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
         else:
-            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\nFor a significant speed-up on NVIDIA GPUs, please install the GPU version:\n    pip install optimum[onnxruntime-gpu]\033[0m")
+            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\nFor a significant speed-up on NVIDIA GPUs, please install the GPU version:\n    pip install \"optimum[onnxruntime-gpu]>=1.16.0\"\033[0m")
 
 
     def export_single_clip(self, clip_model, model_name_hint, optimization_level, use_fp16):
-        """
-        Handles the conversion and saving of a single CLIP model.
-        """
-
-
         if not hasattr(clip_model, 'current_filename') or not clip_model.current_filename:
             print(f"[ERROR] comfy_onnx_exporter: Could not find source filename for {model_name_hint}. Cannot determine save location.")
             return
@@ -78,19 +75,19 @@ class SDXLClipToOnnx:
             try:
                 # 1. Export to standard ONNX
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_name_hint} to ONNX format...")
-                model_kind, model_framework = export(model_name_or_path=tmpdir, output=tmpdir, task="feature-extraction")
+                onnx_export_path = os.path.join(tmpdir, "model.onnx")
+                model_kind, model_framework = export(model_name_or_path=tmpdir, output=onnx_export_path, task="feature-extraction")
 
-                # 2. Create optimizer
-                optimizer = ORTOptimizer.from_pretrained(tmpdir, file_name="model.onnx")
+                # 2. Create optimizer by passing the path to the .onnx file directly
+                optimizer = ONNXRuntimeOptimizer(onnx_model_path=onnx_export_path)
 
-                # 3. Define optimization config (perfect for RTX 3060)
+                # 3. Define optimization config
                 optimization_config = OptimizationConfig(
                     optimization_level=optimization_level, 
                     fp16=use_fp16
                 )
 
                 # 4. Apply optimization
-                # NEW: More informative logging message
                 device_used = "GPU" if self.gpu_available else "CPU"
                 print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
                 optimizer.optimize(save_dir=output_path, optimization_config=optimization_config)
@@ -99,6 +96,7 @@ class SDXLClipToOnnx:
 
             except Exception as e:
                 print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_name_hint}: {e}\033[0m")
+                traceback.print_exc() # Print full traceback for debugging
                 if os.path.exists(output_path):
                     shutil.rmtree(output_path)
 
