@@ -645,20 +645,24 @@ class DualCLIPToTensorRT:
             raise
     
     def _cleanup_temporary_files(self, onnx_path):
-        """Clean up all temporary files including ONNX and any MatMul files"""
+        """Clean up all temporary files including ONNX, MatMul, weight, and bias files"""
         try:
             # Clean up main ONNX file
             if onnx_path and os.path.exists(onnx_path):
                 os.remove(onnx_path)
                 log(f"Cleaned up temporary ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
             
-            # Clean up any leftover ONNX MatMul files in the current directory and temp directories
+            # Clean up any leftover temporary files
             import glob
             cleanup_patterns = [
                 "onnx__MatMul_*",
                 "*.onnx.tmp",
                 "*.onnx_",
-                "*_fallback.onnx"
+                "*_fallback.onnx",
+                "*.weight",
+                "*.bias",
+                "*.weight.*",
+                "*.bias.*"
             ]
             
             # Check current working directory
@@ -666,9 +670,9 @@ class DualCLIPToTensorRT:
                 for temp_file in glob.glob(pattern):
                     try:
                         os.remove(temp_file)
-                        log(f"Cleaned up temporary file: {temp_file}", "DEBUG", True)
-                    except Exception as cleanup_error:
-                        log(f"Could not remove temporary file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+                        # Don't log individual file removals to reduce noise
+                    except Exception:
+                        pass  # Silently ignore cleanup failures
             
             # Check temp directory
             temp_dir = tempfile.gettempdir()
@@ -677,9 +681,9 @@ class DualCLIPToTensorRT:
                 for temp_file in glob.glob(temp_pattern):
                     try:
                         os.remove(temp_file)
-                        log(f"Cleaned up temp file: {temp_file}", "DEBUG", True)
-                    except Exception as cleanup_error:
-                        log(f"Could not remove temp file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+                        # Don't log individual file removals to reduce noise
+                    except Exception:
+                        pass  # Silently ignore cleanup failures
             
             # Check TensorRT output directory for any temporary files
             if os.path.exists(tensorrt_output_dir):
@@ -688,11 +692,12 @@ class DualCLIPToTensorRT:
                     for temp_file in glob.glob(output_pattern):
                         try:
                             os.remove(temp_file)
-                            log(f"Cleaned up output temp file: {temp_file}", "DEBUG", True)
-                        except Exception as cleanup_error:
-                            log(f"Could not remove output temp file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+                            # Don't log individual file removals to reduce noise
+                        except Exception:
+                            pass  # Silently ignore cleanup failures
                             
         except Exception as e:
+            # Only log if there's a major cleanup error
             log(f"Error during cleanup: {str(e)}", "DEBUG", True)
 
 class DualCLIPTensorRTLoader:
