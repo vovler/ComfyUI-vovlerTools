@@ -339,6 +339,10 @@ class DualCLIPToTensorRT:
             # Create TensorRT logger and builder
             log("Initializing TensorRT builder...", "DEBUG", True)
             try:
+                # Check TensorRT environment first
+                log(f"TensorRT available flags: {dir(trt.NetworkDefinitionCreationFlag)}", "DEBUG", True)
+                log(f"EXPLICIT_BATCH value: {trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH}", "DEBUG", True)
+                
                 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
                 log("TensorRT logger created", "DEBUG", True)
                 
@@ -350,6 +354,9 @@ class DualCLIPToTensorRT:
                 
                 log(f"TensorRT version: {trt.__version__}", "INFO", True)
                 log(f"TensorRT builder created successfully", "DEBUG", True)
+                
+                # Test builder methods availability
+                log(f"Builder methods: {[method for method in dir(builder) if 'create' in method.lower()]}", "DEBUG", True)
                 
                 # Check builder capabilities (TensorRT 10.x compatible)
                 try:
@@ -378,20 +385,58 @@ class DualCLIPToTensorRT:
             
             # Create network with explicit batch
             log("Creating TensorRT network...", "DEBUG", True)
+            network = None
+            
+            # Method 1: TensorRT 10.x standard approach
             try:
-                # TensorRT 10.x uses different flag handling
+                log("Attempting network creation with EXPLICIT_BATCH flag (method 1)...", "DEBUG", True)
                 network = builder.create_network(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-                if not network:
-                    # Fallback to older API style
-                    log("Trying fallback network creation method...", "DEBUG", True)
-                    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+                if network:
+                    log("Network created successfully with method 1", "DEBUG", True)
+                else:
+                    log("Method 1 returned None", "DEBUG", True)
             except Exception as network_error:
-                log(f"Network creation error: {str(network_error)}", "ERROR", True)
-                # Try without explicit batch flag as last resort
-                log("Trying basic network creation...", "DEBUG", True)
-                network = builder.create_network()
+                log(f"Method 1 failed: {str(network_error)}", "DEBUG", True)
+            
+            # Method 2: Fallback to bit-shifted flag (older style)
+            if not network:
+                try:
+                    log("Attempting network creation with bit-shifted flag (method 2)...", "DEBUG", True)
+                    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+                    if network:
+                        log("Network created successfully with method 2", "DEBUG", True)
+                    else:
+                        log("Method 2 returned None", "DEBUG", True)
+                except Exception as network_error:
+                    log(f"Method 2 failed: {str(network_error)}", "DEBUG", True)
+            
+            # Method 3: Basic network creation (no flags)
+            if not network:
+                try:
+                    log("Attempting basic network creation (method 3)...", "DEBUG", True)
+                    network = builder.create_network()
+                    if network:
+                        log("Network created successfully with method 3 (no explicit batch)", "DEBUG", True)
+                    else:
+                        log("Method 3 returned None", "DEBUG", True)
+                except Exception as network_error:
+                    log(f"Method 3 failed: {str(network_error)}", "DEBUG", True)
+            
+            # Method 4: Try with integer flag value directly
+            if not network:
+                try:
+                    log("Attempting network creation with integer flag (method 4)...", "DEBUG", True)
+                    network = builder.create_network(1)  # EXPLICIT_BATCH = 1
+                    if network:
+                        log("Network created successfully with method 4", "DEBUG", True)
+                    else:
+                        log("Method 4 returned None", "DEBUG", True)
+                except Exception as network_error:
+                    log(f"Method 4 failed: {str(network_error)}", "DEBUG", True)
             
             if not network:
+                log("All network creation methods failed", "ERROR", True)
+                log("This may indicate a TensorRT installation or compatibility issue", "ERROR", True)
                 raise RuntimeError("Failed to create TensorRT network with all methods")
             
             log("Building dual CLIP network structure for SDXL...", "INFO", True)
