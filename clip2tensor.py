@@ -338,14 +338,27 @@ class DualCLIPToTensorRT:
             
             # Create TensorRT logger and builder
             log("Initializing TensorRT builder...", "DEBUG", True)
-            TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-            builder = trt.Builder(TRT_LOGGER)
-            
-            if not builder:
-                raise RuntimeError("Failed to create TensorRT builder")
-            
-            log(f"TensorRT version: {trt.__version__}", "INFO", True)
-            log(f"TensorRT builder created successfully", "DEBUG", True)
+            try:
+                TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+                log("TensorRT logger created", "DEBUG", True)
+                
+                builder = trt.Builder(TRT_LOGGER)
+                log("TensorRT builder initialization attempted", "DEBUG", True)
+                
+                if not builder:
+                    raise RuntimeError("Failed to create TensorRT builder")
+                
+                log(f"TensorRT version: {trt.__version__}", "INFO", True)
+                log(f"TensorRT builder created successfully", "DEBUG", True)
+                
+                # Check builder capabilities
+                log(f"Builder max batch size: {builder.max_batch_size}", "DEBUG", True)
+                log(f"Platform has fast FP16: {builder.platform_has_fast_fp16}", "DEBUG", True)
+                log(f"Platform has fast INT8: {builder.platform_has_fast_int8}", "DEBUG", True)
+                
+            except Exception as builder_error:
+                log_error_with_traceback("Failed to create TensorRT builder", builder_error)
+                raise
             
             # Check TensorRT capabilities
             if not builder.platform_has_fast_fp16:
@@ -353,35 +366,52 @@ class DualCLIPToTensorRT:
             
             # Create network with explicit batch
             log("Creating TensorRT network...", "DEBUG", True)
-            network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            try:
+                # TensorRT 10.x uses different flag handling
+                network = builder.create_network(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+                if not network:
+                    # Fallback to older API style
+                    log("Trying fallback network creation method...", "DEBUG", True)
+                    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
+            except Exception as network_error:
+                log(f"Network creation error: {str(network_error)}", "ERROR", True)
+                # Try without explicit batch flag as last resort
+                log("Trying basic network creation...", "DEBUG", True)
+                network = builder.create_network()
             
             if not network:
-                raise RuntimeError("Failed to create TensorRT network")
+                raise RuntimeError("Failed to create TensorRT network with all methods")
             
             log("Building dual CLIP network structure for SDXL...", "INFO", True)
             
             # Define network inputs for dual CLIP SDXL
             log("Adding network inputs...", "DEBUG", True)
             
-            # CLIP-L input (typically first CLIP)
-            input_ids_clip_l = network.add_input(
-                "input_ids_clip_l", 
-                trt.int32, 
-                (-1, max_sequence_length)  # Dynamic batch size, 77 tokens
-            )
-            
-            if not input_ids_clip_l:
-                raise RuntimeError("Failed to add CLIP-L input to network")
-            
-            # CLIP-G input (typically second CLIP for SDXL)
-            input_ids_clip_g = network.add_input(
-                "input_ids_clip_g", 
-                trt.int32, 
-                (-1, max_sequence_length)  # Dynamic batch size, 77 tokens
-            )
-            
-            if not input_ids_clip_g:
-                raise RuntimeError("Failed to add CLIP-G input to network")
+            try:
+                # CLIP-L input (typically first CLIP)
+                input_ids_clip_l = network.add_input(
+                    "input_ids_clip_l", 
+                    trt.int32, 
+                    (-1, max_sequence_length)  # Dynamic batch size, 77 tokens
+                )
+                
+                if not input_ids_clip_l:
+                    raise RuntimeError("Failed to add CLIP-L input to network")
+                
+                # CLIP-G input (typically second CLIP for SDXL)
+                input_ids_clip_g = network.add_input(
+                    "input_ids_clip_g", 
+                    trt.int32, 
+                    (-1, max_sequence_length)  # Dynamic batch size, 77 tokens
+                )
+                
+                if not input_ids_clip_g:
+                    raise RuntimeError("Failed to add CLIP-G input to network")
+                    
+            except Exception as input_error:
+                log(f"Input creation error: {str(input_error)}", "ERROR", True)
+                log("This may be due to TensorRT version compatibility issues", "ERROR", True)
+                raise RuntimeError(f"Failed to create network inputs: {str(input_error)}")
             
             log(f"Network inputs created: {input_ids_clip_l.name}, {input_ids_clip_g.name}", "DEBUG", True)
             
@@ -405,9 +435,14 @@ class DualCLIPToTensorRT:
             # This creates a more realistic engine size
             embedding_shape = (vocab_size, clip_l_hidden_dim)
             try:
-                embedding_weights_l = network.add_constant(embedding_shape, trt.Weights(np.random.randn(*embedding_shape).astype(np.float32)))
+                log(f"Creating CLIP-L embedding weights: {embedding_shape} ({np.prod(embedding_shape) * 4 / (1024*1024):.1f}MB)", "DEBUG", True)
+                # Create smaller weights to avoid memory issues during development
+                small_embedding_shape = (min(vocab_size, 1000), clip_l_hidden_dim)
+                embedding_data = np.random.randn(*small_embedding_shape).astype(np.float32)
+                embedding_weights_l = network.add_constant(small_embedding_shape, trt.Weights(embedding_data))
                 if not embedding_weights_l:
                     raise RuntimeError("Failed to add CLIP-L embedding weights")
+                log("CLIP-L embedding weights created successfully", "DEBUG", True)
             except Exception as e:
                 log(f"Error creating CLIP-L embedding weights: {str(e)}", "ERROR", True)
                 raise
@@ -419,10 +454,17 @@ class DualCLIPToTensorRT:
             reshape_l.reshape_dims = (-1, max_sequence_length, 1)
             
             # Create placeholder embedding output for CLIP-L
-            clip_l_output_shape = (-1, max_sequence_length, clip_l_hidden_dim)
-            clip_l_placeholder = network.add_constant(clip_l_output_shape, trt.Weights(np.zeros((1, max_sequence_length, clip_l_hidden_dim), dtype=np.float32)))
-            if not clip_l_placeholder:
-                raise RuntimeError("Failed to add CLIP-L placeholder")
+            try:
+                clip_l_output_shape = (1, max_sequence_length, clip_l_hidden_dim)  # Fixed batch size for constant
+                log(f"Creating CLIP-L placeholder: {clip_l_output_shape}", "DEBUG", True)
+                clip_l_data = np.zeros(clip_l_output_shape, dtype=np.float32)
+                clip_l_placeholder = network.add_constant(clip_l_output_shape, trt.Weights(clip_l_data))
+                if not clip_l_placeholder:
+                    raise RuntimeError("Failed to add CLIP-L placeholder")
+                log("CLIP-L placeholder created successfully", "DEBUG", True)
+            except Exception as e:
+                log(f"Error creating CLIP-L placeholder: {str(e)}", "ERROR", True)
+                raise
             
             # CLIP-G processing (1280-dim output)
             cast_clip_g = network.add_cast(input_ids_clip_g, trt.float32)
@@ -433,31 +475,66 @@ class DualCLIPToTensorRT:
             log(f"Creating embedding weights: CLIP-G {vocab_size}x{clip_g_hidden_dim}", "DEBUG", True)
             
             try:
-                embedding_weights_g = network.add_constant((vocab_size, clip_g_hidden_dim), trt.Weights(np.random.randn(vocab_size, clip_g_hidden_dim).astype(np.float32)))
+                small_embedding_shape_g = (min(vocab_size, 1000), clip_g_hidden_dim)
+                log(f"Creating CLIP-G embedding weights: {small_embedding_shape_g} ({np.prod(small_embedding_shape_g) * 4 / (1024*1024):.1f}MB)", "DEBUG", True)
+                embedding_data_g = np.random.randn(*small_embedding_shape_g).astype(np.float32)
+                embedding_weights_g = network.add_constant(small_embedding_shape_g, trt.Weights(embedding_data_g))
                 if not embedding_weights_g:
                     raise RuntimeError("Failed to add CLIP-G embedding weights")
+                log("CLIP-G embedding weights created successfully", "DEBUG", True)
             except Exception as e:
                 log(f"Error creating CLIP-G embedding weights: {str(e)}", "ERROR", True)
                 raise
             
             # Create placeholder embedding output for CLIP-G
-            clip_g_output_shape = (-1, max_sequence_length, clip_g_hidden_dim)
-            clip_g_placeholder = network.add_constant(clip_g_output_shape, trt.Weights(np.zeros((1, max_sequence_length, clip_g_hidden_dim), dtype=np.float32)))
-            if not clip_g_placeholder:
-                raise RuntimeError("Failed to add CLIP-G placeholder")
+            try:
+                clip_g_output_shape = (1, max_sequence_length, clip_g_hidden_dim)  # Fixed batch size for constant
+                log(f"Creating CLIP-G placeholder: {clip_g_output_shape}", "DEBUG", True)
+                clip_g_data = np.zeros(clip_g_output_shape, dtype=np.float32)
+                clip_g_placeholder = network.add_constant(clip_g_output_shape, trt.Weights(clip_g_data))
+                if not clip_g_placeholder:
+                    raise RuntimeError("Failed to add CLIP-G placeholder")
+                log("CLIP-G placeholder created successfully", "DEBUG", True)
+            except Exception as e:
+                log(f"Error creating CLIP-G placeholder: {str(e)}", "ERROR", True)
+                raise
             
             # Add some processing layers to make the engine more realistic
             log("Adding normalization layers...", "DEBUG", True)
             
-            # Layer normalization simulation for CLIP-L
-            layer_norm_l = network.add_normalization(clip_l_placeholder.get_output(0), trt.Weights(), trt.Weights(), 2)  # Normalize last dimension
-            if not layer_norm_l:
-                raise RuntimeError("Failed to add CLIP-L layer normalization")
-            
-            # Layer normalization simulation for CLIP-G  
-            layer_norm_g = network.add_normalization(clip_g_placeholder.get_output(0), trt.Weights(), trt.Weights(), 2)
-            if not layer_norm_g:
-                raise RuntimeError("Failed to add CLIP-G layer normalization")
+            try:
+                # Layer normalization simulation for CLIP-L
+                log("Adding CLIP-L normalization layer...", "DEBUG", True)
+                # Create normalization weights
+                norm_scale_l = np.ones(clip_l_hidden_dim, dtype=np.float32)
+                norm_bias_l = np.zeros(clip_l_hidden_dim, dtype=np.float32)
+                layer_norm_l = network.add_normalization(
+                    clip_l_placeholder.get_output(0), 
+                    trt.Weights(norm_scale_l), 
+                    trt.Weights(norm_bias_l), 
+                    2  # Normalize last dimension
+                )
+                if not layer_norm_l:
+                    raise RuntimeError("Failed to add CLIP-L layer normalization")
+                log("CLIP-L normalization layer created successfully", "DEBUG", True)
+                
+                # Layer normalization simulation for CLIP-G
+                log("Adding CLIP-G normalization layer...", "DEBUG", True)
+                norm_scale_g = np.ones(clip_g_hidden_dim, dtype=np.float32)
+                norm_bias_g = np.zeros(clip_g_hidden_dim, dtype=np.float32)
+                layer_norm_g = network.add_normalization(
+                    clip_g_placeholder.get_output(0), 
+                    trt.Weights(norm_scale_g), 
+                    trt.Weights(norm_bias_g), 
+                    2  # Normalize last dimension
+                )
+                if not layer_norm_g:
+                    raise RuntimeError("Failed to add CLIP-G layer normalization")
+                log("CLIP-G normalization layer created successfully", "DEBUG", True)
+                
+            except Exception as e:
+                log(f"Error creating normalization layers: {str(e)}", "ERROR", True)
+                raise
             
             # Create outputs - in practice these would be proper text embeddings
             log("Setting up network outputs...", "DEBUG", True)
