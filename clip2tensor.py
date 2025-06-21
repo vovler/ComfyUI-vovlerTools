@@ -346,6 +346,7 @@ class DualCLIPToTensorRT:
 
             clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
             log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
+            log(f"[DEBUG] CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
 
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
@@ -369,7 +370,20 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
+                    log(f"[CLIP_G_Wrapper] Input shape: {input_ids.shape}, dtype: {input_ids.dtype}", "DEBUG", True)
                     outputs = self.clip_g(input_tokens=input_ids)
+                    log(f"[CLIP_G_Wrapper] Raw outputs type: {type(outputs)}", "DEBUG", True)
+                    if isinstance(outputs, (list, tuple)):
+                        log(f"[CLIP_G_Wrapper] Raw outputs length: {len(outputs)}", "DEBUG", True)
+                        for i, out in enumerate(outputs):
+                            if torch.is_tensor(out):
+                                log(f"[CLIP_G_Wrapper] Output {i} shape: {out.shape}, dtype: {out.dtype}", "DEBUG", True)
+                            elif out is None:
+                                log(f"[CLIP_G_Wrapper] Output {i} is None", "DEBUG", True)
+                            else:
+                                log(f"[CLIP_G_Wrapper] Output {i} type: {type(out)}", "DEBUG", True)
+                    else:
+                        log(f"[CLIP_G_Wrapper] Raw outputs not a tuple/list: {type(outputs)}", "DEBUG", True)
                     return outputs[0], outputs[2]
 
 
@@ -559,6 +573,12 @@ class DualCLIPToTensorRT:
             
             # Single ONNX export attempt - no fallbacks
             log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
+            if clip_type == 'clip-g':
+                try:
+                    log(f"[DEBUG] CLIP-G Wrapper model passed to ONNX export: {type(model)}", "DEBUG", True)
+                    log(f"[DEBUG] CLIP-G model device: {next(model.parameters()).device}", "DEBUG", True)
+                except Exception as e:
+                    log(f"[DEBUG] Could not get model device: {e}", "WARNING", True)
             
             # Define the output names based on the clip type
             if clip_type == 'clip-g':
@@ -592,6 +612,13 @@ class DualCLIPToTensorRT:
             )
             
             log(f"{clip_type} ONNX export completed", "DEBUG", True)
+            if os.path.exists(onnx_path):
+                onnx_size_mb = os.path.getsize(onnx_path) / (1024*1024)
+                log(f"Post-export ONNX file size for {clip_type}: {onnx_size_mb:.2f} MB", "INFO", True)
+
+            # Validate ONNX file before proceeding
+            if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
+                raise RuntimeError(f"ONNX export failed for {clip_type}: file not created or is empty.")
             
             # Step 2: Convert ONNX to TensorRT
             log(f"Converting {clip_type} ONNX to TensorRT engine...", "DEBUG", True)
