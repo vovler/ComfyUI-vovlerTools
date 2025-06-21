@@ -5,10 +5,10 @@ import tempfile
 import shutil
 import traceback
 
-# Direct imports without error catching. If a library is missing,
-# ComfyUI will show a full traceback on startup.
+# Direct imports based on the provided __init__.py structure.
+# If these fail, the libraries are not installed correctly.
 import onnxruntime
-from optimum.onnxruntime import ONNXRuntimeOptimizer, OptimizationConfig
+from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx import export
 
 
@@ -36,15 +36,13 @@ class SDXLClipToOnnx:
     FUNCTION = "export_clips_to_onnx"
     
     def __init__(self):
-        # Check for CUDA provider once upon initialization
         self.gpu_available = False
         providers = onnxruntime.get_available_providers()
         if 'CUDAExecutionProvider' in providers:
             self.gpu_available = True
             print("\033[92m[INFO] comfy_onnx_exporter: CUDAExecutionProvider found. GPU will be used for optimization.\033[0m")
         else:
-            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\nFor a significant speed-up on NVIDIA GPUs, please install the GPU version:\n    pip install \"optimum[onnxruntime-gpu]>=1.16.0\"\033[0m")
-
+            print("\033[93m[WARNING] comfy_onnx_exporter: CUDAExecutionProvider not found. Optimization will run on CPU.\033[0m")
 
     def export_single_clip(self, clip_model, model_name_hint, optimization_level, use_fp16):
         if not hasattr(clip_model, 'current_filename') or not clip_model.current_filename:
@@ -63,6 +61,7 @@ class SDXLClipToOnnx:
         print(f"\n[INFO] comfy_onnx_exporter: Starting export for {model_name_hint} ({source_filename})")
         print(f"[INFO] comfy_onnx_exporter: Target ONNX path: {output_path}")
 
+        # Optimum's tools work best with a directory containing the model.
         with tempfile.TemporaryDirectory() as tmpdir:
             print(f"[INFO] comfy_onnx_exporter: Saving temporary HuggingFace model to {tmpdir}")
             
@@ -73,21 +72,22 @@ class SDXLClipToOnnx:
             tokenizer.save_pretrained(tmpdir)
 
             try:
-                # 1. Export to standard ONNX
+                # 1. Export the PyTorch model from the temp directory to ONNX format,
+                # also saving it within the same temp directory. The `export` function
+                # will add the necessary files like model.onnx.
                 print(f"[INFO] comfy_onnx_exporter: Exporting {model_name_hint} to ONNX format...")
-                onnx_export_path = os.path.join(tmpdir, "model.onnx")
-                model_kind, model_framework = export(model_name_or_path=tmpdir, output=onnx_export_path, task="feature-extraction")
+                export(model_name_or_path=tmpdir, output=tmpdir, task="feature-extraction")
 
-                # 2. Create optimizer by passing the path to the .onnx file directly
-                optimizer = ONNXRuntimeOptimizer(onnx_model_path=onnx_export_path)
+                # 2. CORRECTED: Instantiate the optimizer from the directory containing the new ONNX model.
+                optimizer = ORTOptimizer.from_pretrained(tmpdir)
 
-                # 3. Define optimization config
+                # 3. Define the optimization configuration.
                 optimization_config = OptimizationConfig(
                     optimization_level=optimization_level, 
                     fp16=use_fp16
                 )
 
-                # 4. Apply optimization
+                # 4. Apply the optimization and save to the final destination.
                 device_used = "GPU" if self.gpu_available else "CPU"
                 print(f"[INFO] comfy_onnx_exporter: Optimizing model on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
                 optimizer.optimize(save_dir=output_path, optimization_config=optimization_config)
@@ -96,11 +96,11 @@ class SDXLClipToOnnx:
 
             except Exception as e:
                 print(f"\033[91m[ERROR] comfy_onnx_exporter: An error occurred during ONNX export for {model_name_hint}: {e}\033[0m")
-                traceback.print_exc() # Print full traceback for debugging
+                traceback.print_exc()
                 if os.path.exists(output_path):
                     shutil.rmtree(output_path)
 
-    def export_clips_to_onnx(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
+    def export_clips_to_onns(self, clip_l, clip_g, optimization_level, use_fp16, prompt=None, extra_pnginfo=None):
         self.export_single_clip(clip_l, "CLIP-L", optimization_level, use_fp16)
         self.export_single_clip(clip_g, "CLIP-G", optimization_level, use_fp16)
         
