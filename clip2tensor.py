@@ -948,6 +948,18 @@ class TensorRTCLIP:
                 raise RuntimeError(f"Failed to create execution context for {engine_path}")
             
             log(f"TensorRT engine loaded successfully: {os.path.basename(engine_path)}", "DEBUG", True)
+            
+            # Check engine precision
+            if hasattr(engine, 'has_implicit_batch_dimension'):
+                log(f"Engine batch mode: {'Implicit' if engine.has_implicit_batch_dimension else 'Explicit'}", "DEBUG", True)
+            
+            # Log tensor information for debugging
+            for i in range(engine.num_io_tensors):
+                tensor_name = engine.get_tensor_name(i)
+                tensor_mode = engine.get_tensor_mode(tensor_name)
+                tensor_dtype = engine.get_tensor_dtype(tensor_name)
+                log(f"Tensor {i}: {tensor_name}, mode: {tensor_mode}, dtype: {tensor_dtype}", "DEBUG", True)
+            
             return engine, context
             
         except Exception as e:
@@ -1107,6 +1119,14 @@ class TensorRTCLIP:
             
             log(f"CLIP-L inference - batch_size: {batch_size}", "DEBUG", True)
             
+            # Validate engine and context
+            if self.clip_l_engine is None or self.clip_l_context is None:
+                raise RuntimeError("CLIP-L engine or context is None")
+            
+            # Check if engine is valid
+            if not self.clip_l_engine.num_io_tensors > 0:
+                raise RuntimeError("CLIP-L engine has no I/O tensors")
+            
             # Debug engine information
             log(f"CLIP-L engine inputs: {[self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.INPUT]}", "DEBUG", True)
             log(f"CLIP-L engine outputs: {[self.clip_l_engine.get_tensor_name(i) for i in range(self.clip_l_engine.num_io_tensors) if self.clip_l_engine.get_tensor_mode(self.clip_l_engine.get_tensor_name(i)) == trt.TensorIOMode.OUTPUT]}", "DEBUG", True)
@@ -1173,6 +1193,11 @@ class TensorRTCLIP:
             
             # Execute inference
             log("Executing CLIP-L TensorRT inference...", "DEBUG", True)
+            
+            # Debug input values before execution
+            log(f"Input token stats - min: {d_input.min().item()}, max: {d_input.max().item()}", "DEBUG", True)
+            log(f"Input sample tokens: {d_input[0, :10].tolist()}", "DEBUG", True)
+            
             success = self.clip_l_context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
             
             if not success:
@@ -1192,17 +1217,27 @@ class TensorRTCLIP:
             torch.cuda.synchronize()
             log("CLIP-L TensorRT inference completed successfully", "DEBUG", True)
             
+            # Debug output values immediately after execution
+            log(f"Raw output stats - min: {d_output.min().item():.6f}, max: {d_output.max().item():.6f}, mean: {d_output.mean().item():.6f}", "DEBUG", True)
+            log(f"Raw output sample: {d_output[0, 0, :5].tolist()}", "DEBUG", True)
+            
             # Ensure output is properly formatted and has valid values
             result = d_output.clone()
             
             # Check for NaN or invalid values
-            if torch.isnan(result).any():
-                log("Warning: NaN values detected in CLIP-L output", "WARNING", True)
-                result = torch.nan_to_num(result, nan=0.0)
+            nan_count = torch.isnan(result).sum().item()
+            inf_count = torch.isinf(result).sum().item()
             
-            if torch.isinf(result).any():
-                log("Warning: Inf values detected in CLIP-L output", "WARNING", True)
-                result = torch.nan_to_num(result, posinf=1.0, neginf=-1.0)
+            if nan_count > 0:
+                log(f"ERROR: {nan_count} NaN values detected in CLIP-L output - TensorRT engine may be corrupted", "ERROR", True)
+                log("This indicates a serious issue with the TensorRT engine conversion or execution", "ERROR", True)
+                # Don't replace with zeros - this masks the real problem
+                raise RuntimeError(f"CLIP-L TensorRT engine produced {nan_count} NaN values")
+            
+            if inf_count > 0:
+                log(f"ERROR: {inf_count} Inf values detected in CLIP-L output - TensorRT engine may have overflow", "ERROR", True)
+                log("This indicates a serious issue with the TensorRT engine conversion or execution", "ERROR", True)
+                raise RuntimeError(f"CLIP-L TensorRT engine produced {inf_count} Inf values")
             
             log(f"CLIP-L output stats - min: {result.min():.6f}, max: {result.max():.6f}, mean: {result.mean():.6f}", "DEBUG", True)
             
@@ -1326,22 +1361,38 @@ class TensorRTCLIP:
             pooled_result = d_pooled.clone()
             
             # Check for NaN or invalid values in hidden output
-            if torch.isnan(hidden_result).any():
-                log("Warning: NaN values detected in CLIP-G hidden output", "WARNING", True)
-                hidden_result = torch.nan_to_num(hidden_result, nan=0.0)
+            hidden_nan_count = torch.isnan(hidden_result).sum().item()
+            hidden_inf_count = torch.isinf(hidden_result).sum().item()
+            pooled_nan_count = torch.isnan(pooled_result).sum().item()
+            pooled_inf_count = torch.isinf(pooled_result).sum().item()
             
-            if torch.isinf(hidden_result).any():
-                log("Warning: Inf values detected in CLIP-G hidden output", "WARNING", True)
-                hidden_result = torch.nan_to_num(hidden_result, posinf=1.0, neginf=-1.0)
+            if hidden_nan_count > 0:
+                log(f"ERROR: {hidden_nan_count} NaN values detected in CLIP-G hidden output", "ERROR", True)
+                raise RuntimeError(f"CLIP-G TensorRT engine produced {hidden_nan_count} NaN values in hidden output")
             
-            # Check for NaN or invalid values in pooled output
-            if torch.isnan(pooled_result).any():
-                log("Warning: NaN values detected in CLIP-G pooled output", "WARNING", True)
-                pooled_result = torch.nan_to_num(pooled_result, nan=0.0)
+            if hidden_inf_count > 0:
+                log(f"ERROR: {hidden_inf_count} Inf values detected in CLIP-G hidden output", "ERROR", True)
+                raise RuntimeError(f"CLIP-G TensorRT engine produced {hidden_inf_count} Inf values in hidden output")
             
-            if torch.isinf(pooled_result).any():
-                log("Warning: Inf values detected in CLIP-G pooled output", "WARNING", True)
-                pooled_result = torch.nan_to_num(pooled_result, posinf=1.0, neginf=-1.0)
+            if pooled_nan_count > 0:
+                log(f"ERROR: {pooled_nan_count} NaN values detected in CLIP-G pooled output", "ERROR", True)
+                raise RuntimeError(f"CLIP-G TensorRT engine produced {pooled_nan_count} NaN values in pooled output")
+            
+            if pooled_inf_count > 0:
+                log(f"ERROR: {pooled_inf_count} Inf values detected in CLIP-G pooled output", "ERROR", True)
+                raise RuntimeError(f"CLIP-G TensorRT engine produced {pooled_inf_count} Inf values in pooled output")
+            
+            # Check for suspicious value ranges that might indicate quantization issues
+            hidden_min, hidden_max = hidden_result.min().item(), hidden_result.max().item()
+            pooled_min, pooled_max = pooled_result.min().item(), pooled_result.max().item()
+            
+            if abs(hidden_min) >= 500 or abs(hidden_max) >= 500:
+                log(f"WARNING: CLIP-G hidden values seem unusually large: min={hidden_min:.2f}, max={hidden_max:.2f}", "WARNING", True)
+                log("This might indicate quantization issues in the TensorRT engine", "WARNING", True)
+            
+            if abs(pooled_min) >= 500 or abs(pooled_max) >= 500:
+                log(f"WARNING: CLIP-G pooled values seem unusually large: min={pooled_min:.2f}, max={pooled_max:.2f}", "WARNING", True)
+                log("This might indicate quantization issues in the TensorRT engine", "WARNING", True)
             
             log(f"CLIP-G hidden stats - min: {hidden_result.min():.6f}, max: {hidden_result.max():.6f}, mean: {hidden_result.mean():.6f}", "DEBUG", True)
             log(f"CLIP-G pooled stats - min: {pooled_result.min():.6f}, max: {pooled_result.max():.6f}, mean: {pooled_result.mean():.6f}", "DEBUG", True)
