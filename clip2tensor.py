@@ -324,6 +324,9 @@ class DualCLIPToTensorRT:
         log("Creating TensorRT engines for dual CLIP models (SDXL)...", "INFO", True)
         log("Using PyTorch -> ONNX -> TensorRT conversion workflow", "INFO", True)
         
+        clip_l_engine_path = None
+        clip_g_engine_path = None
+        
         try:
             # Load CLIP models using ComfyUI's built-in functionality
             log("Loading CLIP models from safetensors...", "INFO", True)
@@ -389,6 +392,21 @@ class DualCLIPToTensorRT:
         except Exception as e:
             log_error_with_traceback("Failed to create TensorRT engine", e)
             
+            # Clean up any partial engine files on failure
+            if clip_l_engine_path and os.path.exists(clip_l_engine_path):
+                try:
+                    os.remove(clip_l_engine_path)
+                    log(f"Cleaned up partial CLIP-L engine file", "DEBUG", True)
+                except:
+                    pass
+            
+            if clip_g_engine_path and os.path.exists(clip_g_engine_path):
+                try:
+                    os.remove(clip_g_engine_path)
+                    log(f"Cleaned up partial CLIP-G engine file", "DEBUG", True)
+                except:
+                    pass
+            
             # Provide specific suggestions based on error type
             error_str = str(e).lower()
             if "memory" in error_str or "out of memory" in error_str:
@@ -401,6 +419,8 @@ class DualCLIPToTensorRT:
                 log("Suggestion: Check CUDA installation and GPU driver", "INFO", True)
             elif "permission" in error_str:
                 log(f"Suggestion: Check write permissions for {tensorrt_output_dir}", "INFO", True)
+            elif "onnx" in error_str:
+                log("Suggestion: ONNX export or parsing failed - check model compatibility", "INFO", True)
             
             raise
     
@@ -488,118 +508,14 @@ class DualCLIPToTensorRT:
             except Exception as safetensors_error:
                 log(f"Safetensors loading failed: {str(safetensors_error)}", "DEBUG", True)
             
-            # Method 2: Fallback to simple model
-            log(f"Creating simplified {clip_type} model for ONNX export", "DEBUG", True)
-            if clip_type == "clip-l":
-                model = self._create_clip_l_model()
-            elif clip_type == "clip-g":
-                model = self._create_clip_g_model()
-            else:
-                raise ValueError(f"Unknown CLIP type: {clip_type}")
-            
-            model.eval()
-            log(f"{clip_type} model ready for ONNX export", "DEBUG", True)
-            return model
+            # If safetensors loading fails, raise error - no fallbacks
+            raise RuntimeError(f"Failed to load {clip_type} model from safetensors: {str(safetensors_error)}")
             
         except Exception as e:
             log_error_with_traceback(f"Failed to load {clip_type} model", e)
             raise
     
-    def _create_clip_l_model(self):
-        """Create CLIP-L model structure (ONNX-compatible placeholder)"""
-        import torch.nn as nn
-        
-        class CLIPLModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.token_embedding = nn.Embedding(49408, 768)  # vocab_size, hidden_dim
-                self.positional_embedding = nn.Parameter(torch.zeros(77, 768))
-                
-                # Very simple ONNX-compatible layers (no attention to avoid ONNX issues)
-                self.linear1 = nn.Linear(768, 3072)
-                self.activation = nn.ReLU()  # Use ReLU instead of GELU for better ONNX compatibility
-                self.linear2 = nn.Linear(3072, 768)
-                self.linear3 = nn.Linear(768, 768)  # Additional processing layer
-                self.ln1 = nn.LayerNorm(768)
-                self.ln2 = nn.LayerNorm(768)
-                self.ln_final = nn.LayerNorm(768)
-                self.dropout = nn.Dropout(0.1)
-                
-            def forward(self, input_ids):
-                # Embedding + positional encoding
-                x = self.token_embedding(input_ids)
-                x = x + self.positional_embedding
-                
-                # Simple feed-forward processing (no attention)
-                # Layer 1: FFN + residual
-                residual = x
-                x = self.ln1(x)
-                x = self.linear1(x)
-                x = self.activation(x)
-                x = self.dropout(x)
-                x = self.linear2(x)
-                x = residual + x
-                
-                # Layer 2: Additional processing
-                residual = x
-                x = self.ln2(x)
-                x = self.linear3(x)
-                x = self.activation(x)
-                x = residual + x
-                
-                # Final layer norm
-                x = self.ln_final(x)
-                return x
-        
-        return CLIPLModel()
-    
-    def _create_clip_g_model(self):
-        """Create CLIP-G model structure (ONNX-compatible placeholder)"""
-        import torch.nn as nn
-        
-        class CLIPGModel(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.token_embedding = nn.Embedding(49408, 1280)  # vocab_size, hidden_dim
-                self.positional_embedding = nn.Parameter(torch.zeros(77, 1280))
-                
-                # Very simple ONNX-compatible layers (no attention to avoid ONNX issues)
-                self.linear1 = nn.Linear(1280, 5120)
-                self.activation = nn.ReLU()  # Use ReLU instead of GELU for better ONNX compatibility
-                self.linear2 = nn.Linear(5120, 1280)
-                self.linear3 = nn.Linear(1280, 1280)  # Additional processing layer
-                self.ln1 = nn.LayerNorm(1280)
-                self.ln2 = nn.LayerNorm(1280)
-                self.ln_final = nn.LayerNorm(1280)
-                self.dropout = nn.Dropout(0.1)
-                
-            def forward(self, input_ids):
-                # Embedding + positional encoding
-                x = self.token_embedding(input_ids)
-                x = x + self.positional_embedding
-                
-                # Simple feed-forward processing (no attention)
-                # Layer 1: FFN + residual
-                residual = x
-                x = self.ln1(x)
-                x = self.linear1(x)
-                x = self.activation(x)
-                x = self.dropout(x)
-                x = self.linear2(x)
-                x = residual + x
-                
-                # Layer 2: Additional processing
-                residual = x
-                x = self.ln2(x)
-                x = self.linear3(x)
-                x = self.activation(x)
-                x = residual + x
-                
-                # Final layer norm
-                x = self.ln_final(x)
-                return x
-        
-        return CLIPGModel()
+
     
     def _create_single_clip_engine(self, model, engine_path, clip_type, 
                                  prompt_batch_min, prompt_batch_opt, prompt_batch_max):
@@ -607,6 +523,7 @@ class DualCLIPToTensorRT:
         Create TensorRT engine for a single CLIP model
         Uses PyTorch -> ONNX -> TensorRT workflow
         """
+        onnx_path = None
         try:
             log(f"Creating {clip_type} TensorRT engine...", "INFO", True)
             
@@ -617,79 +534,22 @@ class DualCLIPToTensorRT:
             model.eval()
             dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long)
             
-            # Try multiple ONNX export configurations for compatibility
-            export_success = False
-            
-            # Configuration 1: ONNX opset 16 (more compatible with ONNX 1.16.x)
-            try:
-                log(f"Attempting ONNX export with opset 16...", "DEBUG", True)
-                torch.onnx.export(
-                    model,
-                    dummy_input,
-                    onnx_path,
-                    export_params=True,
-                    opset_version=16,
-                    do_constant_folding=True,
-                    input_names=['input_ids'],
-                    output_names=['text_embeddings'],
-                    dynamic_axes={
-                        'input_ids': {0: 'batch_size'},
-                        'text_embeddings': {0: 'batch_size'}
-                    }
-                )
-                export_success = True
-                log(f"ONNX export successful with opset 16", "DEBUG", True)
-            except Exception as e:
-                log(f"ONNX export failed with opset 16: {str(e)}", "DEBUG", True)
-            
-            # Configuration 2: ONNX opset 14 (fallback)
-            if not export_success:
-                try:
-                    log(f"Attempting ONNX export with opset 14...", "DEBUG", True)
-                    torch.onnx.export(
-                        model,
-                        dummy_input,
-                        onnx_path,
-                        export_params=True,
-                        opset_version=14,
-                        do_constant_folding=True,
-                        input_names=['input_ids'],
-                        output_names=['text_embeddings'],
-                        dynamic_axes={
-                            'input_ids': {0: 'batch_size'},
-                            'text_embeddings': {0: 'batch_size'}
-                        }
-                    )
-                    export_success = True
-                    log(f"ONNX export successful with opset 14", "DEBUG", True)
-                except Exception as e:
-                    log(f"ONNX export failed with opset 14: {str(e)}", "DEBUG", True)
-            
-            # Configuration 3: ONNX opset 11 (maximum compatibility)
-            if not export_success:
-                try:
-                    log(f"Attempting ONNX export with opset 11...", "DEBUG", True)
-                    torch.onnx.export(
-                        model,
-                        dummy_input,
-                        onnx_path,
-                        export_params=True,
-                        opset_version=11,
-                        do_constant_folding=False,  # Disable constant folding for compatibility
-                        input_names=['input_ids'],
-                        output_names=['text_embeddings'],
-                        dynamic_axes={
-                            'input_ids': {0: 'batch_size'},
-                            'text_embeddings': {0: 'batch_size'}
-                        }
-                    )
-                    export_success = True
-                    log(f"ONNX export successful with opset 11", "DEBUG", True)
-                except Exception as e:
-                    log(f"ONNX export failed with opset 11: {str(e)}", "DEBUG", True)
-            
-            if not export_success:
-                raise RuntimeError(f"Failed to export {clip_type} model to ONNX with all opset versions")
+            # Single ONNX export attempt - no fallbacks
+            log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
+            torch.onnx.export(
+                model,
+                dummy_input,
+                onnx_path,
+                export_params=True,
+                opset_version=16,
+                do_constant_folding=True,
+                input_names=['input_ids'],
+                output_names=['text_embeddings'],
+                dynamic_axes={
+                    'input_ids': {0: 'batch_size'},
+                    'text_embeddings': {0: 'batch_size'}
+                }
+            )
             
             log(f"{clip_type} ONNX export completed", "DEBUG", True)
             
@@ -698,20 +558,18 @@ class DualCLIPToTensorRT:
             self._onnx_to_tensorrt(onnx_path, engine_path, clip_type,
                                 prompt_batch_min, prompt_batch_opt, prompt_batch_max)
             
-            # Clean up ONNX file
-            if os.path.exists(onnx_path):
-                os.remove(onnx_path)
-                log(f"Cleaned up temporary ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
-            
             log(f"{clip_type} TensorRT engine created successfully", "INFO", True)
             
         except Exception as e:
             log_error_with_traceback(f"Failed to create {clip_type} TensorRT engine", e)
             raise
+        finally:
+            # Always clean up ONNX files and any temporary files
+            self._cleanup_temporary_files(onnx_path)
     
     def _onnx_to_tensorrt(self, onnx_path, engine_path, clip_type,
                          prompt_batch_min, prompt_batch_opt, prompt_batch_max):
-        """Convert ONNX model to TensorRT engine with fallback options"""
+        """Convert ONNX model to TensorRT engine - no fallbacks"""
         try:
             # Get GPU memory and calculate 80% for memory pool
             gpu_memory_gb = get_gpu_memory_gb()
@@ -732,7 +590,6 @@ class DualCLIPToTensorRT:
             onnx_file_size = os.path.getsize(onnx_path) / (1024*1024)
             log(f"ONNX file size: {onnx_file_size:.1f}MB", "DEBUG", True)
             
-            parse_success = False
             with open(onnx_path, 'rb') as model_file:
                 onnx_data = model_file.read()
                 log(f"Read {len(onnx_data)} bytes from ONNX file", "DEBUG", True)
@@ -746,19 +603,9 @@ class DualCLIPToTensorRT:
                         error_msg = parser.get_error(error)
                         log(f"ONNX Parser Error {error}: {error_msg}", "ERROR", True)
                     
-                    # Check if this is a CLIP-G specific issue
-                    if clip_type == "clip-g":
-                        log("CLIP-G ONNX parsing failed, attempting fallback strategies...", "WARNING", True)
-                        return self._create_fallback_clip_g_engine(engine_path, clip_type, 
-                                                                 prompt_batch_min, prompt_batch_opt, prompt_batch_max)
-                    else:
-                        raise RuntimeError(f"Failed to parse ONNX file for {clip_type}")
+                    raise RuntimeError(f"Failed to parse ONNX file for {clip_type}")
                 else:
-                    parse_success = True
                     log(f"{clip_type} ONNX parsed successfully", "DEBUG", True)
-            
-            if not parse_success:
-                return
             
             # Configure builder
             config = builder.create_builder_config()
@@ -781,13 +628,7 @@ class DualCLIPToTensorRT:
             # Build engine
             serialized_engine = builder.build_serialized_network(network, config)
             if serialized_engine is None:
-                log(f"TensorRT build failed for {clip_type}", "ERROR", True)
-                if clip_type == "clip-g":
-                    log("Attempting CLIP-G fallback...", "WARNING", True)
-                    return self._create_fallback_clip_g_engine(engine_path, clip_type,
-                                                             prompt_batch_min, prompt_batch_opt, prompt_batch_max)
-                else:
-                    raise RuntimeError(f"Failed to build TensorRT engine for {clip_type}")
+                raise RuntimeError(f"Failed to build TensorRT engine for {clip_type}")
             
             build_time = time.time() - build_start_time
             log(f"{clip_type} TensorRT build completed in {build_time:.1f} seconds", "INFO", True)
@@ -801,119 +642,58 @@ class DualCLIPToTensorRT:
             
         except Exception as e:
             log_error_with_traceback(f"Failed to convert {clip_type} ONNX to TensorRT", e)
-            
-            # Try fallback for CLIP-G
-            if clip_type == "clip-g":
-                log("Attempting CLIP-G fallback due to conversion error...", "WARNING", True)
-                try:
-                    return self._create_fallback_clip_g_engine(engine_path, clip_type,
-                                                             prompt_batch_min, prompt_batch_opt, prompt_batch_max)
-                except Exception as fallback_error:
-                    log_error_with_traceback("Fallback also failed", fallback_error)
-                    raise
-            else:
-                raise
-    
-    def _create_fallback_clip_g_engine(self, engine_path, clip_type, 
-                                     prompt_batch_min, prompt_batch_opt, prompt_batch_max):
-        """Create a fallback CLIP-G engine using simplified model"""
-        try:
-            log("Creating fallback CLIP-G engine with simplified model...", "WARNING", True)
-            
-            # Create simplified CLIP-G model
-            fallback_model = self._create_clip_g_model()
-            fallback_model.eval()
-            
-            # Export to ONNX with more conservative settings
-            fallback_onnx_path = engine_path.replace('.engine', '_fallback.onnx')
-            log(f"Exporting fallback CLIP-G to ONNX: {os.path.basename(fallback_onnx_path)}", "DEBUG", True)
-            
-            dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long)
-            
-            # Try very conservative ONNX export settings
-            torch.onnx.export(
-                fallback_model,
-                dummy_input,
-                fallback_onnx_path,
-                export_params=True,
-                opset_version=11,  # Use older, more stable opset
-                do_constant_folding=False,  # Disable optimizations that might cause issues
-                input_names=['input_ids'],
-                output_names=['text_embeddings'],
-                dynamic_axes={
-                    'input_ids': {0: 'batch_size'},
-                    'text_embeddings': {0: 'batch_size'}
-                },
-                verbose=False
-            )
-            
-            log("Fallback CLIP-G ONNX export successful", "DEBUG", True)
-            
-            # Convert fallback ONNX to TensorRT
-            log("Converting fallback CLIP-G ONNX to TensorRT...", "DEBUG", True)
-            
-            # Get GPU memory
-            gpu_memory_gb = get_gpu_memory_gb()
-            memory_pool_bytes = int(gpu_memory_gb * 0.8 * 1024**3)
-            
-            # Create TensorRT components
-            TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-            builder = trt.Builder(TRT_LOGGER)
-            network = builder.create_network()
-            parser = trt.OnnxParser(network, TRT_LOGGER)
-            
-            # Parse fallback ONNX
-            with open(fallback_onnx_path, 'rb') as model_file:
-                if not parser.parse(model_file.read()):
-                    error_msg = "Failed to parse fallback ONNX file for CLIP-G"
-                    for error in range(parser.num_errors):
-                        log(f"Fallback ONNX Parser Error {error}: {parser.get_error(error)}", "ERROR", True)
-                    raise RuntimeError(error_msg)
-            
-            log("Fallback CLIP-G ONNX parsed successfully", "DEBUG", True)
-            
-            # Configure builder with conservative settings
-            config = builder.create_builder_config()
-            config.set_flag(trt.BuilderFlag.FP16)
-            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, memory_pool_bytes // 2)  # Use less memory
-            
-            # Add optimization profile
-            profile = builder.create_optimization_profile()
-            profile.set_shape(
-                'input_ids',
-                (prompt_batch_min, 77),
-                (prompt_batch_opt, 77),
-                (prompt_batch_max, 77)
-            )
-            config.add_optimization_profile(profile)
-            
-            log("Building fallback CLIP-G TensorRT engine...", "INFO", True)
-            build_start_time = time.time()
-            
-            # Build engine
-            serialized_engine = builder.build_serialized_network(network, config)
-            if serialized_engine is None:
-                raise RuntimeError("Failed to build fallback TensorRT engine for CLIP-G")
-            
-            build_time = time.time() - build_start_time
-            log(f"Fallback CLIP-G TensorRT build completed in {build_time:.1f} seconds", "INFO", True)
-            
-            # Save engine
-            with open(engine_path, 'wb') as f:
-                f.write(serialized_engine)
-            
-            engine_size = os.path.getsize(engine_path) / (1024*1024)
-            log(f"Fallback CLIP-G engine saved: {os.path.basename(engine_path)} ({engine_size:.1f}MB)", "WARNING", True)
-            log("Note: Using simplified CLIP-G model - may have reduced quality", "WARNING", True)
-            
-            # Clean up fallback ONNX
-            if os.path.exists(fallback_onnx_path):
-                os.remove(fallback_onnx_path)
-                log(f"Cleaned up fallback ONNX file", "DEBUG", True)
-                
-        except Exception as e:
-            log_error_with_traceback("Failed to create fallback CLIP-G engine", e)
             raise
+    
+    def _cleanup_temporary_files(self, onnx_path):
+        """Clean up all temporary files including ONNX and any MatMul files"""
+        try:
+            # Clean up main ONNX file
+            if onnx_path and os.path.exists(onnx_path):
+                os.remove(onnx_path)
+                log(f"Cleaned up temporary ONNX file: {os.path.basename(onnx_path)}", "DEBUG", True)
+            
+            # Clean up any leftover ONNX MatMul files in the current directory and temp directories
+            import glob
+            cleanup_patterns = [
+                "onnx__MatMul_*",
+                "*.onnx.tmp",
+                "*.onnx_",
+                "*_fallback.onnx"
+            ]
+            
+            # Check current working directory
+            for pattern in cleanup_patterns:
+                for temp_file in glob.glob(pattern):
+                    try:
+                        os.remove(temp_file)
+                        log(f"Cleaned up temporary file: {temp_file}", "DEBUG", True)
+                    except Exception as cleanup_error:
+                        log(f"Could not remove temporary file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+            
+            # Check temp directory
+            temp_dir = tempfile.gettempdir()
+            for pattern in cleanup_patterns:
+                temp_pattern = os.path.join(temp_dir, pattern)
+                for temp_file in glob.glob(temp_pattern):
+                    try:
+                        os.remove(temp_file)
+                        log(f"Cleaned up temp file: {temp_file}", "DEBUG", True)
+                    except Exception as cleanup_error:
+                        log(f"Could not remove temp file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+            
+            # Check TensorRT output directory for any temporary files
+            if os.path.exists(tensorrt_output_dir):
+                for pattern in cleanup_patterns:
+                    output_pattern = os.path.join(tensorrt_output_dir, pattern)
+                    for temp_file in glob.glob(output_pattern):
+                        try:
+                            os.remove(temp_file)
+                            log(f"Cleaned up output temp file: {temp_file}", "DEBUG", True)
+                        except Exception as cleanup_error:
+                            log(f"Could not remove output temp file {temp_file}: {str(cleanup_error)}", "DEBUG", True)
+                            
+        except Exception as e:
+            log(f"Error during cleanup: {str(e)}", "DEBUG", True)
 
 class DualCLIPTensorRTLoader:
     @classmethod
