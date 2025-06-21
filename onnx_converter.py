@@ -9,8 +9,7 @@ import torch
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx import main_export
-# CORRECTED: Import AutoencoderKL from its specific submodule
-from diffusers.models.autoencoder_kl import AutoencoderKL
+from diffusers import AutoencoderKL
 
 
 # --- Helper function for exporting components ---
