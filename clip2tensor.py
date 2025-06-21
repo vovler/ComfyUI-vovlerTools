@@ -438,7 +438,7 @@ class DualCLIPToTensorRT:
             elif "onnx" in error_str:
                 log("Suggestion: ONNX export or parsing failed - check model compatibility", "INFO", True)
             
-                        raise
+            raise
 
     def _create_clip_wrapper(self, transformer, clip_type):
         """Create an ONNX-exportable wrapper around ComfyUI's CLIP transformer"""
