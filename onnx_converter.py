@@ -3,7 +3,7 @@ import folder_paths
 import tempfile
 import shutil
 import traceback
-
+import diffusers
 # Required imports
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
@@ -91,7 +91,7 @@ class SDXLClipToOnnx:
                         output=tmpdir_export,
                         task="feature-extraction",
                         framework="pt",
-                        library_name="transformers",
+                        library_name="diffusers",
                         device=self.device,
                         no_post_process=True
                     )
