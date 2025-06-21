@@ -5,15 +5,17 @@ import shutil
 import traceback
 
 # Required imports
+import torch
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
 from optimum.exporters.onnx import main_export
+from diffusers import VAEModel
 
 
 # --- Helper function for exporting components ---
 def export_component(component_name, source_path, final_output_dir, optimization_level, use_fp16, device="cpu", gpu_available=False):
     """
-    Handles the export and optimization of a single model component.
+    Handles the export and optimization of a single, well-defined model component.
     """
     print(f"\n[INFO] ONNX Exporter: Starting export for component: {component_name.upper()}")
     
@@ -23,12 +25,13 @@ def export_component(component_name, source_path, final_output_dir, optimization
         print(f"[INFO] ONNX Exporter: Output directory '{final_component_path}' already exists. Skipping component.")
         return True
 
-    # Mapping from our component names to optimum's task names
+    # CORRECTED: Use the specific tasks registered in optimum's model_configs.py
     task_map = {
-        "unet": "diffusion",
+        "unet": "semantic-segmentation",
         "text_encoder": "feature-extraction",
         "text_encoder_2": "feature-extraction",
-        "vae": "vision2seq-lm", # VAE is exported as a single task
+        "vae_encoder": "semantic-segmentation",
+        "vae_decoder": "semantic-segmentation",
     }
     task = task_map.get(component_name)
     
@@ -38,7 +41,7 @@ def export_component(component_name, source_path, final_output_dir, optimization
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir_export:
-            print(f"[INFO] ONNX Exporter: Exporting {component_name} to temporary ONNX format...")
+            print(f"[INFO] ONNX Exporter: Exporting '{component_name}' with task '{task}' to temporary ONNX format...")
             
             main_export(
                 model_name_or_path=source_path,
@@ -49,17 +52,19 @@ def export_component(component_name, source_path, final_output_dir, optimization
                 fp16=use_fp16, # Apply fp16 during export if requested
                 no_post_process=True # We will do our own optimization
             )
-
+            
+            # After export, the temp directory contains the model.onnx and config files.
+            # We can now optimize it.
             optimizer = ORTOptimizer.from_pretrained(tmpdir_export)
-            # Level 2 (all basic and extended optimizations) is usually a good balance.
             optimization_config = OptimizationConfig(
                 optimization_level=optimization_level,
-                fp16=False # Let the main export handle FP16 conversion for better consistency.
+                fp16=False # FP16 conversion is already done during export for better consistency.
             )
             
             device_used = "GPU" if gpu_available else "CPU"
-            print(f"[INFO] ONNX Exporter: Optimizing {component_name} on {device_used} (Level: {optimization_level})...")
+            print(f"[INFO] ONNX Exporter: Optimizing {component_name} on {device_used} (Level: {optimization_level}, FP16: {use_fp16})...")
             
+            # The optimized model will be saved in a new directory structure
             optimizer.optimize(save_dir=final_component_path, optimization_config=optimization_config)
 
             print(f"\033[92m[SUCCESS] ONNX Exporter: Successfully exported and optimized {component_name} to:\n{final_component_path}\033[0m")
@@ -71,23 +76,20 @@ def export_component(component_name, source_path, final_output_dir, optimization
         return False
 
 
-# --- Node: Export from a Diffusers Directory ---
+# --- The Main Node Class ---
 
 class SDXLDirectoryToOnnx:
     """
     A ComfyUI node to load a model from a diffusers directory structure
-    and export its components into separate ONNX files.
+    and export its components (UNet, Text Encoders, VAE) into separate ONNX files.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
 
     @classmethod
     def INPUT_TYPES(cls):
-        # Create the path for diffusers models if it doesn't exist
         diffusers_path = os.path.join(folder_paths.get_base_path(), "models", "diffusers")
         os.makedirs(diffusers_path, exist_ok=True)
-        
-        # Get a list of directories inside the diffusers model path
         model_dirs = [d for d in os.listdir(diffusers_path) if os.path.isdir(os.path.join(diffusers_path, d))]
         
         return {
@@ -127,37 +129,48 @@ class SDXLDirectoryToOnnx:
         print(f"[INFO] ONNX Exporter: Final models will be saved in: {final_output_dir}")
 
         try:
-            # Determine which components to process based on user selection
-            components_to_export = []
-            if export_unet: components_to_export.append("unet")
-            if export_clip: components_to_export.extend(["text_encoder", "text_encoder_2"])
-            if export_vae: components_to_export.append("vae")
-
-            for component in components_to_export:
-                component_source_path = os.path.join(source_model_dir, component)
-                if not os.path.isdir(component_source_path):
-                    print(f"\033[93m[WARNING] ONNX Exporter: Component directory '{component}' not found in source. Skipping.\033[0m")
-                    continue
-                
-                export_component(
-                    component,
-                    component_source_path,
-                    final_output_dir,
-                    optimization_level, use_fp16, self.device, self.gpu_available
-                )
+            # --- UNet and CLIP Export (Standard) ---
+            if export_unet:
+                export_component("unet", os.path.join(source_model_dir, "unet"), final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
             
-            # Copy non-ONNX files like tokenizers if CLIP export was requested
             if export_clip:
-                print("[INFO] ONNX Exporter: Copying tokenizer files...")
-                tokenizer_src = os.path.join(source_model_dir, "tokenizer")
-                tokenizer_2_src = os.path.join(source_model_dir, "tokenizer_2")
-
-                if os.path.isdir(tokenizer_src):
-                    shutil.copytree(tokenizer_src, os.path.join(final_output_dir, "tokenizer"), dirs_exist_ok=True)
-                if os.path.isdir(tokenizer_2_src):
-                    shutil.copytree(tokenizer_2_src, os.path.join(final_output_dir, "tokenizer_2"), dirs_exist_ok=True)
+                export_component("text_encoder", os.path.join(source_model_dir, "text_encoder"), final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
+                export_component("text_encoder_2", os.path.join(source_model_dir, "text_encoder_2"), final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
                 
+                print("[INFO] ONNX Exporter: Copying tokenizer files...")
+                shutil.copytree(os.path.join(source_model_dir, "tokenizer"), os.path.join(final_output_dir, "tokenizer"), dirs_exist_ok=True)
+                shutil.copytree(os.path.join(source_model_dir, "tokenizer_2"), os.path.join(final_output_dir, "tokenizer_2"), dirs_exist_ok=True)
                 print(f"\033[92m[SUCCESS] ONNX Exporter: Copied tokenizers to {final_output_dir}\033[0m")
+
+            # --- VAE Export (Special Handling) ---
+            if export_vae:
+                print("\n[INFO] ONNX Exporter: Starting special handling for VAE export.")
+                vae_source_path = os.path.join(source_model_dir, "vae")
+                if not os.path.isdir(vae_source_path):
+                    print(f"\033[93m[WARNING] ONNX Exporter: VAE directory '{vae_source_path}' not found. Skipping VAE export.\033[0m")
+                else:
+                    with tempfile.TemporaryDirectory() as tmp_vae_dir:
+                        print("[INFO] ONNX Exporter: Loading VAE and splitting into encoder/decoder for export...")
+                        
+                        # Load the complete VAE model from the source directory
+                        dtype = torch.float16 if use_fp16 else torch.float32
+                        vae = VAEModel.from_pretrained(vae_source_path, torch_dtype=dtype)
+                        
+                        # Save the encoder and decoder parts to separate temporary directories
+                        encoder_path = os.path.join(tmp_vae_dir, 'encoder')
+                        decoder_path = os.path.join(tmp_vae_dir, 'decoder')
+                        vae.encoder.save_pretrained(encoder_path)
+                        vae.decoder.save_pretrained(decoder_path)
+                        
+                        # Free up memory
+                        del vae
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+                        print("[INFO] ONNX Exporter: VAE split complete. Exporting sub-models...")
+                        # Now, export each part using our standard component exporter
+                        export_component("vae_encoder", encoder_path, final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
+                        export_component("vae_decoder", decoder_path, final_output_dir, optimization_level, use_fp16, self.device, self.gpu_available)
 
         except Exception as e:
             traceback.print_exc()
