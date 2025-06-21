@@ -278,82 +278,72 @@ class DualCLIPToTensorRT:
             log(f"Token sequence length: 77 (SDXL standard)", "INFO", True)
             log(f"Output engine: {engine_filename}", "INFO", True)
             
+            # Initialize engine paths for exception handling
+            clip_l_engine_path = None
+            clip_g_engine_path = None
+            
             # Load CLIP models using ComfyUI's built-in functionality
-            log("Loading CLIP models...", "INFO", True)
-            
-            success_msg = self._create_tensorrt_engine(
-                clip1_path, clip2_path, engine_path, clip_name1, clip_name2,
-                prompt_batch_min, prompt_batch_opt, prompt_batch_max
-            )
-            
-            return (success_msg,)
-            
-        except MemoryError as e:
-            error_msg = "Out of memory during TensorRT conversion. Try reducing batch sizes or closing other applications."
-            log_error_with_traceback(error_msg, e)
-            log(f"Suggested action: Reduce prompt_batch_max from {prompt_batch_max} to {max(1, prompt_batch_max // 2)}", "INFO", True)
-            return (error_msg,)
-            
-        except PermissionError as e:
-            error_msg = "Permission denied during TensorRT conversion. Check file/directory permissions."
-            log_error_with_traceback(error_msg, e)
-            return (error_msg,)
-            
-        except Exception as e:
-            error_msg = f"Error during dual CLIP to TensorRT conversion: {str(e)}"
-            log_error_with_traceback(error_msg, e)
-            
-            # Provide helpful suggestions based on error type
-            if "CUDA" in str(e):
-                log("Suggestion: Check CUDA installation and GPU availability", "INFO", True)
-            elif "TensorRT" in str(e):
-                log("Suggestion: Check TensorRT installation and compatibility", "INFO", True)
-            elif "memory" in str(e).lower():
-                log("Suggestion: Reduce batch sizes or free up GPU memory", "INFO", True)
-            
-            return (error_msg,)
-    
-    def _create_tensorrt_engine(self, clip1_path, clip2_path, engine_path, clip_name1, clip_name2,
-                              prompt_batch_min, prompt_batch_opt, prompt_batch_max):
-        """
-        Create separate TensorRT engines from dual CLIP models for SDXL
-        Uses PyTorch -> ONNX -> TensorRT workflow
-        Always uses fp16 precision and 77 token sequence length
-        """
-        
-        log("Creating TensorRT engines for dual CLIP models (SDXL)...", "INFO", True)
-        log("Using PyTorch -> ONNX -> TensorRT conversion workflow", "INFO", True)
-        
-        clip_l_engine_path = None
-        clip_g_engine_path = None
-        
-        try:
-            # === THE FIX: USE COMFYUI'S NATIVE LOADER AND GET THE TRANSFORMER ===
             log("Loading CLIP models using ComfyUI's native loader...", "INFO", True)
 
             # Load the first model, which should contain CLIP-L
-            log(f"Loading CLIP-L from {clip_name1}...", "DEBUG", True)
+            log(f"Loading first CLIP model from {clip_name1}...", "DEBUG", True)
             clip_object_1 = comfy.sd.load_clip(ckpt_paths=[clip1_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
 
-
             # Load the second model, which should contain CLIP-G
-            log(f"Loading CLIP-G from {clip_name2}...", "DEBUG", True)
+            log(f"Loading second CLIP model from {clip_name2}...", "DEBUG", True)
             clip_object_2 = comfy.sd.load_clip(ckpt_paths=[clip2_path], embedding_directory=folder_paths.get_folder_paths("embeddings"))
             
+            # Inspect the loaded models to determine which contains which CLIP type
+            clip_l_model = None
+            clip_g_model = None
             
-            clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
-            log(f"Successfully loaded CLIP-L transformer from {clip_name1}", "DEBUG", True)
-            log(f"[DEBUG] CLIP-L transformer type: {type(clip_l_model)}", "DEBUG", True)
-
-            clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
-            log(f"Successfully loaded CLIP-G transformer from {clip_name2}", "DEBUG", True)
-            log(f"[DEBUG] CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
+            # Check first model for CLIP-L and CLIP-G
+            log("Inspecting first model structure...", "DEBUG", True)
+            if hasattr(clip_object_1.cond_stage_model, 'clip_l') and clip_object_1.cond_stage_model.clip_l is not None:
+                clip_l_model = clip_object_1.cond_stage_model.clip_l.transformer
+                log(f"Found CLIP-L in first model ({clip_name1})", "DEBUG", True)
+                log(f"CLIP-L transformer type: {type(clip_l_model)}", "DEBUG", True)
+            
+            if hasattr(clip_object_1.cond_stage_model, 'clip_g') and clip_object_1.cond_stage_model.clip_g is not None:
+                clip_g_model = clip_object_1.cond_stage_model.clip_g.transformer
+                log(f"Found CLIP-G in first model ({clip_name1})", "DEBUG", True)
+                log(f"CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
+            
+            # Check second model for CLIP-L and CLIP-G
+            log("Inspecting second model structure...", "DEBUG", True)
+            if hasattr(clip_object_2.cond_stage_model, 'clip_l') and clip_object_2.cond_stage_model.clip_l is not None:
+                if clip_l_model is None:
+                    clip_l_model = clip_object_2.cond_stage_model.clip_l.transformer
+                    log(f"Found CLIP-L in second model ({clip_name2})", "DEBUG", True)
+                    log(f"CLIP-L transformer type: {type(clip_l_model)}", "DEBUG", True)
+                else:
+                    log(f"Second model also has CLIP-L, using first model's CLIP-L", "DEBUG", True)
+            
+            if hasattr(clip_object_2.cond_stage_model, 'clip_g') and clip_object_2.cond_stage_model.clip_g is not None:
+                if clip_g_model is None:
+                    clip_g_model = clip_object_2.cond_stage_model.clip_g.transformer
+                    log(f"Found CLIP-G in second model ({clip_name2})", "DEBUG", True)
+                    log(f"CLIP-G transformer type: {type(clip_g_model)}", "DEBUG", True)
+                else:
+                    log(f"Second model also has CLIP-G, using first model's CLIP-G", "DEBUG", True)
+            
+            # Validate that we found both CLIP models
+            if clip_l_model is None:
+                raise ValueError(f"Could not find CLIP-L model in either {clip_name1} or {clip_name2}. Make sure at least one file contains a CLIP-L model.")
+            
+            if clip_g_model is None:
+                raise ValueError(f"Could not find CLIP-G model in either {clip_name1} or {clip_name2}. Make sure at least one file contains a CLIP-G model.")
+            
+            log("Successfully located both CLIP-L and CLIP-G models", "INFO", True)
 
             # Move models to GPU for conversion
             device = 'cuda'
             log(f"Moving models to '{device}' for ONNX export...", "INFO", True)
             clip_l_model = clip_l_model.to(device)
             clip_g_model = clip_g_model.to(device)
+
+            log(f"CLIP-L model device: {next(clip_l_model.parameters()).device}", "DEBUG", True)
+            log(f"CLIP-G model device: {next(clip_g_model.parameters()).device}", "DEBUG", True)
 
             # Clean up the full clip objects to save memory
             del clip_object_1, clip_object_2
@@ -425,11 +415,22 @@ class DualCLIPToTensorRT:
             
             success_msg = f"Dual CLIP SDXL TensorRT engines created successfully: CLIP-L ({clip_l_size:.1f}MB) + CLIP-G ({clip_g_size:.1f}MB) = {total_size:.1f}MB total"
             log(success_msg, "INFO", True)
-            return success_msg
-
+            return (success_msg,)
+            
+        except MemoryError as e:
+            error_msg = "Out of memory during TensorRT conversion. Try reducing batch sizes or closing other applications."
+            log_error_with_traceback(error_msg, e)
+            log(f"Suggested action: Reduce prompt_batch_max from {prompt_batch_max} to {max(1, prompt_batch_max // 2)}", "INFO", True)
+            return (error_msg,)
+            
+        except PermissionError as e:
+            error_msg = "Permission denied during TensorRT conversion. Check file/directory permissions."
+            log_error_with_traceback(error_msg, e)
+            return (error_msg,)
             
         except Exception as e:
-            log_error_with_traceback("Failed to create TensorRT engine", e)
+            error_msg = f"Error during dual CLIP to TensorRT conversion: {str(e)}"
+            log_error_with_traceback(error_msg, e)
             
             # Clean up any partial engine files on failure
             if clip_l_engine_path and os.path.exists(clip_l_engine_path):
@@ -446,22 +447,15 @@ class DualCLIPToTensorRT:
                 except:
                     pass
             
-            # Provide specific suggestions based on error type
-            error_str = str(e).lower()
-            if "memory" in error_str or "out of memory" in error_str:
-                log("Suggestion: Reduce prompt batch sizes or free up GPU memory", "INFO", True)
-                log(f"Current max batch: {prompt_batch_max}, try reducing to {max(1, prompt_batch_max // 2)}", "INFO", True)
-            elif "tensorrt" in error_str:
-                log("Suggestion: Check TensorRT installation and version compatibility", "INFO", True)
-                log(f"Current TensorRT version: {trt.__version__}", "INFO", True)
-            elif "cuda" in error_str:
-                log("Suggestion: Check CUDA installation and GPU driver", "INFO", True)
-            elif "permission" in error_str:
-                log(f"Suggestion: Check write permissions for {tensorrt_output_dir}", "INFO", True)
-            elif "onnx" in error_str:
-                log("Suggestion: ONNX export or parsing failed - check model compatibility", "INFO", True)
+            # Provide helpful suggestions based on error type
+            if "CUDA" in str(e):
+                log("Suggestion: Check CUDA installation and GPU availability", "INFO", True)
+            elif "TensorRT" in str(e):
+                log("Suggestion: Check TensorRT installation and compatibility", "INFO", True)
+            elif "memory" in str(e).lower():
+                log("Suggestion: Reduce batch sizes or free up GPU memory", "INFO", True)
             
-            raise
+            return (error_msg,)
 
     def _create_single_clip_engine(self, model, engine_path, clip_type, 
                                  prompt_batch_min, prompt_batch_opt, prompt_batch_max):
