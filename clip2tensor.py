@@ -625,72 +625,91 @@ class DualCLIPToTensorRT:
                 if clip_type == 'clip-g':
                     log(f"Attempting CLIP-G ONNX export with compatibility fixes...", "DEBUG", True)
                     
-                    # Strategy 1: Try with older opset version (more compatible)
+                    # Strategy 1: Try with opset 14+ (supports aten::triu)
                     try:
-                        log(f"Trying CLIP-G export with opset 11 (more compatible)...", "DEBUG", True)
+                        log(f"Trying CLIP-G export with opset 16 (supports aten::triu)...", "DEBUG", True)
                         torch.onnx.export(
                             model,
                             model_args,
                             onnx_path,
                             export_params=True,
-                            opset_version=11,  # Use older, more stable opset
+                            opset_version=16,  # Higher opset supports more operators
                             do_constant_folding=False,  # Disable optimizations that might cause issues
                             input_names=['input_ids'],
                             output_names=output_names,
                             dynamic_axes={
                                 'input_ids': {0: 'batch_size'},
                                 **dynamic_axes_outputs
-                            },
-                            # Additional options for problematic models
-                            keep_initializers_as_inputs=True,
-                            export_modules_as_functions=False
+                            }
                         )
-                        log(f"CLIP-G opset 11 export succeeded", "DEBUG", True)
-                    except Exception as opset11_error:
-                        log(f"Opset 11 export failed: {str(opset11_error)}", "DEBUG", True)
+                        log(f"CLIP-G opset 16 export succeeded", "DEBUG", True)
+                    except Exception as opset16_error:
+                        log(f"Opset 16 export failed: {str(opset16_error)}", "DEBUG", True)
                         
-                        # Strategy 2: Try torch.jit.trace instead of onnx.export
+                        # Strategy 2: Try opset 14 (minimum for aten::triu)
                         try:
-                            log(f"Trying CLIP-G with torch.jit.trace approach...", "DEBUG", True)
-                            
-                            # First trace the model
-                            model.eval()
-                            with torch.no_grad():
-                                traced_model = torch.jit.trace(model, model_args[0])
-                            
-                            # Then export the traced model
+                            log(f"Trying CLIP-G export with opset 14 (minimum for aten::triu)...", "DEBUG", True)
                             torch.onnx.export(
-                                traced_model,
+                                model,
                                 model_args,
                                 onnx_path,
                                 export_params=True,
-                                opset_version=11,
+                                opset_version=14,
                                 do_constant_folding=False,
                                 input_names=['input_ids'],
                                 output_names=output_names,
                                 dynamic_axes={
                                     'input_ids': {0: 'batch_size'},
                                     **dynamic_axes_outputs
-                                }
+                                },
+                                keep_initializers_as_inputs=True,
+                                export_modules_as_functions=False
                             )
-                            log(f"CLIP-G jit.trace export succeeded", "DEBUG", True)
-                        except Exception as trace_error:
-                            log(f"JIT trace export failed: {str(trace_error)}", "DEBUG", True)
+                            log(f"CLIP-G opset 14 export succeeded", "DEBUG", True)
+                        except Exception as opset14_error:
+                            log(f"Opset 14 export failed: {str(opset14_error)}", "DEBUG", True)
                             
-                            # Strategy 3: Fallback to simplest possible export
-                            log(f"Trying CLIP-G with minimal export options...", "DEBUG", True)
-                            torch.onnx.export(
-                                model,
-                                model_args,
-                                onnx_path,
-                                export_params=True,
-                                opset_version=9,  # Very old, very compatible
-                                do_constant_folding=False,
-                                training=False,
-                                input_names=['input_ids'],
-                                output_names=output_names
-                                # No dynamic axes to avoid complexity
-                            )
+                            # Strategy 3: Try torch.jit.trace with opset 16
+                            try:
+                                log(f"Trying CLIP-G with torch.jit.trace approach (opset 16)...", "DEBUG", True)
+                                
+                                # First trace the model
+                                model.eval()
+                                with torch.no_grad():
+                                    traced_model = torch.jit.trace(model, model_args[0])
+                                
+                                # Then export the traced model
+                                torch.onnx.export(
+                                    traced_model,
+                                    model_args,
+                                    onnx_path,
+                                    export_params=True,
+                                    opset_version=16,
+                                    do_constant_folding=False,
+                                    input_names=['input_ids'],
+                                    output_names=output_names,
+                                    dynamic_axes={
+                                        'input_ids': {0: 'batch_size'},
+                                        **dynamic_axes_outputs
+                                    }
+                                )
+                                log(f"CLIP-G jit.trace export succeeded", "DEBUG", True)
+                            except Exception as trace_error:
+                                log(f"JIT trace export failed: {str(trace_error)}", "DEBUG", True)
+                                
+                                # Strategy 4: Fallback to simplest possible export with fixed training mode
+                                log(f"Trying CLIP-G with minimal export options...", "DEBUG", True)
+                                torch.onnx.export(
+                                    model,
+                                    model_args,
+                                    onnx_path,
+                                    export_params=True,
+                                    opset_version=16,
+                                    do_constant_folding=False,
+                                    input_names=['input_ids'],
+                                    output_names=output_names
+                                    # No dynamic axes and no training parameter to avoid complexity
+                                )
                 else:
                     # For CLIP-L, use the original approach (it works)
                     torch.onnx.export(
