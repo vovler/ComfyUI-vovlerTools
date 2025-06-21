@@ -173,6 +173,60 @@ def get_existing_tensorrt_engines():
         log_error_with_traceback("Failed to scan TensorRT engines directory", e)
         return ["Error scanning TensorRT engines folder"]
 
+
+class CLIP_L_Wrapper(torch.nn.Module):
+    def __init__(self, clip_l_model):
+        super().__init__()
+        self.clip_l = clip_l_model
+    def forward(self, input_ids):
+        # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
+        # For CLIP-L we only need the sequence output (last hidden state)
+        outputs = self.clip_l(input_tokens=input_ids)
+        return outputs[0]  # last_hidden_state
+
+class CLIP_G_Wrapper(torch.nn.Module):
+    def __init__(self, clip_g_model):
+        super().__init__()
+        self.clip_g = clip_g_model
+    def forward(self, input_ids):
+        # Raw CLIPTextModel returns (x[0], x[1], out, x[2]) where:
+        # x[0] = last hidden state, x[1] = intermediate, out = projected, x[2] = pooled
+        # For ONNX export compatibility, use final layer instead of intermediate_output=-2
+        print(f"[CLIP_G_Wrapper] Forward called with input_ids shape: {input_ids.shape}")
+        print(f"[CLIP_G_Wrapper] Input device: {input_ids.device}, dtype: {input_ids.dtype}")
+        print(f"[CLIP_G_Wrapper] Input min/max: {input_ids.min()}/{input_ids.max()}")
+        
+        try:
+            # Use final layer output to avoid ONNX negative indexing issues
+            # Note: This differs from SDXLClipG's penultimate layer, but needed for ONNX compatibility
+            outputs = self.clip_g(input_tokens=input_ids)
+            print(f"[CLIP_G_Wrapper] Raw CLIP-G outputs: {len(outputs)} items")
+            for i, output in enumerate(outputs):
+                if output is not None:
+                    print(f"[CLIP_G_Wrapper] Raw output[{i}]: shape={output.shape}, dtype={output.dtype}, device={output.device}")
+                else:
+                    print(f"[CLIP_G_Wrapper] Raw output[{i}]: None")
+            
+            # Use final layer output for ONNX compatibility
+            last_hidden_state = outputs[0]  # final layer sequence output
+            projected_pooled = outputs[2]   # projected pooled output
+            print(f"[CLIP_G_Wrapper] Using final layer for ONNX compatibility")
+            
+            print(f"[CLIP_G_Wrapper] Selected last_hidden_state: shape={last_hidden_state.shape}, dtype={last_hidden_state.dtype}")
+            print(f"[CLIP_G_Wrapper] Selected projected_pooled: shape={projected_pooled.shape}, dtype={projected_pooled.dtype}")
+            
+            result = (last_hidden_state, projected_pooled)
+            print(f"[CLIP_G_Wrapper] Returning tuple with {len(result)} items")
+            return result
+            
+        except Exception as e:
+            print(f"[CLIP_G_Wrapper] ERROR in forward pass: {str(e)}")
+            print(f"[CLIP_G_Wrapper] Error type: {type(e)}")
+            import traceback
+            print(f"[CLIP_G_Wrapper] Traceback:")
+            traceback.print_exc()
+            raise 
+
 class DualCLIPToTensorRT:
     @classmethod
     def INPUT_TYPES(s):
@@ -365,84 +419,28 @@ class DualCLIPToTensorRT:
 
             log(f"CLIP-L model device: {next(clip_l_model.parameters()).device}", "DEBUG", True)
             log(f"CLIP-G model device: {next(clip_g_model.parameters()).device}", "DEBUG", True)
-
-            # Clean up the full clip objects to save memory
-            del clip_object_1, clip_object_2
-            model_management.soft_empty_cache()
             
             # === END OF THE FIX ===
             
             # Create separate engines for each CLIP model
             log("Creating separate TensorRT engines for CLIP-L and CLIP-G", "INFO", True)
             
-            import torch
-            class CLIP_L_Wrapper(torch.nn.Module):
-                def __init__(self, clip_l_model):
-                    super().__init__()
-                    self.clip_l = clip_l_model
-                def forward(self, input_ids):
-                    # ComfyUI CLIPTextModel returns (x[0], x[1], out, x[2])
-                    # For CLIP-L we only need the sequence output (last hidden state)
-                    outputs = self.clip_l(input_tokens=input_ids)
-                    return outputs[0]  # last_hidden_state
 
-            class CLIP_G_Wrapper(torch.nn.Module):
-                def __init__(self, clip_g_model):
-                    super().__init__()
-                    self.clip_g = clip_g_model
-                def forward(self, input_ids):
-                    # Raw CLIPTextModel returns (x[0], x[1], out, x[2]) where:
-                    # x[0] = last hidden state, x[1] = intermediate, out = projected, x[2] = pooled
-                    # For ONNX export compatibility, use final layer instead of intermediate_output=-2
-                    print(f"[CLIP_G_Wrapper] Forward called with input_ids shape: {input_ids.shape}")
-                    print(f"[CLIP_G_Wrapper] Input device: {input_ids.device}, dtype: {input_ids.dtype}")
-                    print(f"[CLIP_G_Wrapper] Input min/max: {input_ids.min()}/{input_ids.max()}")
-                    
-                    try:
-                        # Use final layer output to avoid ONNX negative indexing issues
-                        # Note: This differs from SDXLClipG's penultimate layer, but needed for ONNX compatibility
-                        outputs = self.clip_g(input_tokens=input_ids)
-                        print(f"[CLIP_G_Wrapper] Raw CLIP-G outputs: {len(outputs)} items")
-                        for i, output in enumerate(outputs):
-                            if output is not None:
-                                print(f"[CLIP_G_Wrapper] Raw output[{i}]: shape={output.shape}, dtype={output.dtype}, device={output.device}")
-                            else:
-                                print(f"[CLIP_G_Wrapper] Raw output[{i}]: None")
-                        
-                        # Use final layer output for ONNX compatibility
-                        last_hidden_state = outputs[0]  # final layer sequence output
-                        projected_pooled = outputs[2]   # projected pooled output
-                        print(f"[CLIP_G_Wrapper] Using final layer for ONNX compatibility")
-                        
-                        print(f"[CLIP_G_Wrapper] Selected last_hidden_state: shape={last_hidden_state.shape}, dtype={last_hidden_state.dtype}")
-                        print(f"[CLIP_G_Wrapper] Selected projected_pooled: shape={projected_pooled.shape}, dtype={projected_pooled.dtype}")
-                        
-                        result = (last_hidden_state, projected_pooled)
-                        print(f"[CLIP_G_Wrapper] Returning tuple with {len(result)} items")
-                        return result
-                        
-                    except Exception as e:
-                        print(f"[CLIP_G_Wrapper] ERROR in forward pass: {str(e)}")
-                        print(f"[CLIP_G_Wrapper] Error type: {type(e)}")
-                        import traceback
-                        print(f"[CLIP_G_Wrapper] Traceback:")
-                        traceback.print_exc()
-                        raise
 
             # Test the models first to debug the outputs
             log("Testing CLIP model outputs for debugging...", "DEBUG", True)
             test_input = torch.randint(0, 49408, (1, 77), dtype=torch.long, device=device)
             
-            try:
-                clip_l_outputs = clip_l_model(input_tokens=test_input)
-                log(f"CLIP-L raw outputs: {len(clip_l_outputs)} items", "DEBUG", True)
-                for i, output in enumerate(clip_l_outputs):
-                    if output is not None:
-                        log(f"CLIP-L output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
-                    else:
-                        log(f"CLIP-L output[{i}]: None", "DEBUG", True)
-            except Exception as e:
-                log(f"CLIP-L test failed: {str(e)}", "ERROR", True)
+            #try:
+             #   clip_l_outputs = clip_l_model(input_tokens=test_input)
+             #   log(f"CLIP-L raw outputs: {len(clip_l_outputs)} items", "DEBUG", True)
+             #   for i, output in enumerate(clip_l_outputs):
+             #       if output is not None:
+             #           log(f"CLIP-L output[{i}] shape: {output.shape if hasattr(output, 'shape') else type(output)}", "DEBUG", True)
+             #       else:
+             #           log(f"CLIP-L output[{i}]: None", "DEBUG", True)
+            #except Exception as e:
+            #    log(f"CLIP-L test failed: {str(e)}", "ERROR", True)
             
             try:
                 clip_g_outputs = clip_g_model(input_tokens=test_input)
@@ -457,14 +455,14 @@ class DualCLIPToTensorRT:
             
             # Test the wrappers before ONNX export
             log("Testing wrapper outputs...", "DEBUG", True)
-            clip_l_wrapper = CLIP_L_Wrapper(clip_l_model)
+            #clip_l_wrapper = CLIP_L_Wrapper(clip_l_model)
             clip_g_wrapper = CLIP_G_Wrapper(clip_g_model)
             
-            try:
-                clip_l_wrapper_out = clip_l_wrapper(test_input)
-                log(f"CLIP-L wrapper output shape: {clip_l_wrapper_out.shape}", "DEBUG", True)
-            except Exception as e:
-                log(f"CLIP-L wrapper test failed: {str(e)}", "ERROR", True)
+            #try:
+            #    clip_l_wrapper_out = clip_l_wrapper(test_input)
+            #    log(f"CLIP-L wrapper output shape: {clip_l_wrapper_out.shape}", "DEBUG", True)
+            #except Exception as e:
+            #    log(f"CLIP-L wrapper test failed: {str(e)}", "ERROR", True)
             
             try:
                 clip_g_wrapper_out = clip_g_wrapper(test_input)
@@ -477,51 +475,142 @@ class DualCLIPToTensorRT:
             except Exception as e:
                 log(f"CLIP-G wrapper test failed: {str(e)}", "ERROR", True)
             
-            # Create CLIP-L engine
-            clip_l_engine_path = engine_path.replace('.engine', '_clip_l.engine')
-            log(f"Creating CLIP-L engine: {os.path.basename(clip_l_engine_path)}", "INFO")
-            self._create_single_clip_engine(
-                CLIP_L_Wrapper(clip_l_model), clip_l_engine_path, "clip-l",
-                prompt_batch_min, prompt_batch_opt, prompt_batch_max
-            )
+            # Test the model wrapper first
+            log(f"Testing {clip_type} wrapper before ONNX export...", "DEBUG", True)
+            try:
+                wrapper_output = model(dummy_input)
+                if isinstance(wrapper_output, (tuple, list)):
+                    log(f"{clip_type} wrapper returned {len(wrapper_output)} outputs", "DEBUG", True)
+                    for i, out in enumerate(wrapper_output):
+                        log(f"  - Output {i}: {out.shape} dtype={out.dtype}", "DEBUG", True)
+                else:
+                    log(f"{clip_type} wrapper returned single output: {wrapper_output.shape} dtype={wrapper_output.dtype}", "DEBUG", True)
+            except Exception as e:
+                log(f"ERROR: {clip_type} wrapper test failed: {str(e)}", "ERROR", True)
+                raise RuntimeError(f"Wrapper test failed for {clip_type}: {str(e)}")
+            
+            # For CLIP-G, try to disable PyTorch optimizations that might interfere with ONNX export
+            original_backends = None
+            if clip_type == 'clip-g':
+                log(f"Disabling PyTorch optimizations for CLIP-G ONNX export...", "DEBUG", True)
+                # Disable optimized attention temporarily
+                original_backends = torch.backends.opt_einsum.enabled
+                torch.backends.opt_einsum.enabled = False
+                
+                # Set model to eval mode and disable gradients
+                model.eval()
+                for param in model.parameters():
+                    param.requires_grad = False
+            
+            try:
+                # Try multiple ONNX export strategies for CLIP-G compatibility
+                if clip_type == 'clip-g':
+                    log(f"Attempting CLIP-G ONNX export with compatibility fixes...", "DEBUG", True)
+                    
+                    # Strategy 1: Try with older opset version (more compatible)
+                    try:
+                        log(f"Trying CLIP-G export with opset 11 (more compatible)...", "DEBUG", True)
+                        torch.onnx.export(
+                            model,
+                            model_args,
+                            onnx_path,
+                            export_params=True,
+                            opset_version=11,  # Use older, more stable opset
+                            do_constant_folding=False,  # Disable optimizations that might cause issues
+                            input_names=['input_ids'],
+                            output_names=output_names,
+                            dynamic_axes={
+                                'input_ids': {0: 'batch_size'},
+                                **dynamic_axes_outputs
+                            },
+                            # Additional options for problematic models
+                            keep_initializers_as_inputs=True,
+                            export_modules_as_functions=False
+                        )
+                        log(f"CLIP-G opset 11 export succeeded", "DEBUG", True)
+                    except Exception as opset11_error:
+                        log(f"Opset 11 export failed: {str(opset11_error)}", "DEBUG", True)
+                        
+                        # Strategy 2: Try torch.jit.trace instead of onnx.export
+                        try:
+                            log(f"Trying CLIP-G with torch.jit.trace approach...", "DEBUG", True)
+                            
+                            # First trace the model
+                            model.eval()
+                            with torch.no_grad():
+                                traced_model = torch.jit.trace(model, model_args[0])
+                            
+                            # Then export the traced model
+                            torch.onnx.export(
+                                traced_model,
+                                model_args,
+                                onnx_path,
+                                export_params=True,
+                                opset_version=11,
+                                do_constant_folding=False,
+                                input_names=['input_ids'],
+                                output_names=output_names,
+                                dynamic_axes={
+                                    'input_ids': {0: 'batch_size'},
+                                    **dynamic_axes_outputs
+                                }
+                            )
+                            log(f"CLIP-G jit.trace export succeeded", "DEBUG", True)
+                        except Exception as trace_error:
+                            log(f"JIT trace export failed: {str(trace_error)}", "DEBUG", True)
+                            
+                            # Strategy 3: Fallback to simplest possible export
+                            log(f"Trying CLIP-G with minimal export options...", "DEBUG", True)
+                            torch.onnx.export(
+                                model,
+                                model_args,
+                                onnx_path,
+                                export_params=True,
+                                opset_version=9,  # Very old, very compatible
+                                do_constant_folding=False,
+                                training=False,
+                                input_names=['input_ids'],
+                                output_names=output_names
+                                # No dynamic axes to avoid complexity
+                            )
+                else:
+                    # For CLIP-L, use the original approach (it works)
+                    torch.onnx.export(
+                        model,
+                        model_args,
+                        onnx_path,
+                        export_params=True,
+                        opset_version=16,
+                        do_constant_folding=True,
+                        input_names=['input_ids'],
+                        output_names=output_names,
+                        dynamic_axes={
+                            'input_ids': {0: 'batch_size'},
+                            **dynamic_axes_outputs  # Merge the output axes
+                        }
+                    )
+            except Exception as onnx_error:
+                log(f"ONNX export failed for {clip_type}: {str(onnx_error)}", "ERROR", True)
+                log(f"ONNX error type: {type(onnx_error)}", "ERROR", True)
+                import traceback
+                log(f"ONNX export traceback:", "ERROR", True)
+                for line in traceback.format_exc().split('\n'):
+                    if line.strip():
+                        log(f"  {line}", "ERROR", True)
+                raise
+            
+            log(f"{clip_type} ONNX export completed", "DEBUG", True)
 
-            # Create CLIP-G engine
-            clip_g_engine_path = engine_path.replace('.engine', '_clip_g.engine')
-            log(f"Creating CLIP-G engine: {os.path.basename(clip_g_engine_path)}", "INFO")
-            self._create_single_clip_engine(
-                CLIP_G_Wrapper(clip_g_model), clip_g_engine_path, "clip-g",
-                prompt_batch_min, prompt_batch_opt, prompt_batch_max
-            )
+            # Validate ONNX file before proceeding
+            if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
+                raise RuntimeError(f"ONNX export failed for {clip_type}: file not created or is empty.")
             
-            # Create a metadata file to link the two engines
-            metadata_path = engine_path.replace('.engine', '_metadata.json')
-            metadata = {
-                "clip_l_engine": os.path.basename(clip_l_engine_path),
-                "clip_g_engine": os.path.basename(clip_g_engine_path),
-                "clip_l_model": clip_name1,
-                "clip_g_model": clip_name2,
-                "batch_sizes": {
-                    "min": prompt_batch_min,
-                    "opt": prompt_batch_opt,
-                    "max": prompt_batch_max
-                },
-                "sequence_length": 77,
-                "precision": "fp16",
-                "created_at": time.time()
-            }
+            # Step 2: Convert ONNX to TensorRT
+            log(f"Converting {clip_type} ONNX to TensorRT engine...", "DEBUG", True)
+            self._onnx_to_tensorrt(onnx_path, engine_path, clip_type,
+                                prompt_batch_min, prompt_batch_opt, prompt_batch_max)
             
-            import json
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-            
-            # Get combined size
-            clip_l_size = os.path.getsize(clip_l_engine_path) / (1024*1024)
-            clip_g_size = os.path.getsize(clip_g_engine_path) / (1024*1024)
-            total_size = clip_l_size + clip_g_size
-            
-            success_msg = f"Dual CLIP SDXL TensorRT engines created successfully: CLIP-L ({clip_l_size:.1f}MB) + CLIP-G ({clip_g_size:.1f}MB) = {total_size:.1f}MB total"
-            log(success_msg, "INFO", True)
-            return (success_msg,)
+            log(f"{clip_type} TensorRT engine created successfully", "INFO", True)
             
         except MemoryError as e:
             error_msg = "Out of memory during TensorRT conversion. Try reducing batch sizes or closing other applications."
@@ -563,106 +652,8 @@ class DualCLIPToTensorRT:
             
             return (error_msg,)
 
-    def _create_single_clip_engine(self, model, engine_path, clip_type, 
-                                 prompt_batch_min, prompt_batch_opt, prompt_batch_max):
-        """
-        Create TensorRT engine for a single CLIP model
-        Uses PyTorch -> ONNX -> TensorRT workflow
-        """
-        onnx_path = None
-        try:
-            log(f"Creating {clip_type} TensorRT engine...", "INFO", True)
-            
-            # Step 1: Export to ONNX
-            onnx_path = engine_path.replace('.engine', '.onnx')
-            log(f"Exporting {clip_type} to ONNX: {os.path.basename(onnx_path)}", "DEBUG", True)
-            
-            model.eval()
-            device = next(model.parameters()).device
-            dummy_input = torch.randint(0, 49408, (prompt_batch_opt, 77), dtype=torch.long, device=device)
-            
-            # Single ONNX export attempt - no fallbacks
-            log(f"Exporting {clip_type} to ONNX with opset 16...", "DEBUG", True)
-            
-            # Define the output names based on the clip type
-            if clip_type == 'clip-g':
-                # CLIP-G needs both outputs for SDXL
-                output_names = ['last_hidden_state', 'pooled_output']
-                dynamic_axes_outputs = {
-                    'last_hidden_state': {0: 'batch_size'},
-                    'pooled_output': {0: 'batch_size'}
-                }
-                model_args = (dummy_input,)
-            else:  # clip-l
-                output_names = ['last_hidden_state']
-                dynamic_axes_outputs = {
-                    'last_hidden_state': {0: 'batch_size'}
-                }
-                model_args = (dummy_input,)
-            
-            log(f"ONNX export config for {clip_type}:", "DEBUG", True)
-            log(f"  - Model args: {[arg.shape for arg in model_args]}", "DEBUG", True)
-            log(f"  - Output names: {output_names}", "DEBUG", True)
-            log(f"  - Dynamic axes: {{'input_ids': {{0: 'batch_size'}}, **{dynamic_axes_outputs}}}", "DEBUG", True)
-            
-            # Test the model wrapper first
-            log(f"Testing {clip_type} wrapper before ONNX export...", "DEBUG", True)
-            try:
-                wrapper_output = model(dummy_input)
-                if isinstance(wrapper_output, (tuple, list)):
-                    log(f"{clip_type} wrapper returned {len(wrapper_output)} outputs", "DEBUG", True)
-                    for i, out in enumerate(wrapper_output):
-                        log(f"  - Output {i}: {out.shape} dtype={out.dtype}", "DEBUG", True)
-                else:
-                    log(f"{clip_type} wrapper returned single output: {wrapper_output.shape} dtype={wrapper_output.dtype}", "DEBUG", True)
-            except Exception as e:
-                log(f"ERROR: {clip_type} wrapper test failed: {str(e)}", "ERROR", True)
-                raise RuntimeError(f"Wrapper test failed for {clip_type}: {str(e)}")
-            
-            try:
-                torch.onnx.export(
-                    model,
-                    model_args,
-                    onnx_path,
-                    export_params=True,
-                    opset_version=16,
-                    do_constant_folding=True,
-                    input_names=['input_ids'],
-                    output_names=output_names,
-                    dynamic_axes={
-                        'input_ids': {0: 'batch_size'},
-                        **dynamic_axes_outputs  # Merge the output axes
-                    }
-                )
-            except Exception as onnx_error:
-                log(f"ONNX export failed for {clip_type}: {str(onnx_error)}", "ERROR", True)
-                log(f"ONNX error type: {type(onnx_error)}", "ERROR", True)
-                import traceback
-                log(f"ONNX export traceback:", "ERROR", True)
-                for line in traceback.format_exc().split('\n'):
-                    if line.strip():
-                        log(f"  {line}", "ERROR", True)
-                raise
-            
-            log(f"{clip_type} ONNX export completed", "DEBUG", True)
 
-            # Validate ONNX file before proceeding
-            if not os.path.exists(onnx_path) or os.path.getsize(onnx_path) == 0:
-                raise RuntimeError(f"ONNX export failed for {clip_type}: file not created or is empty.")
-            
-            # Step 2: Convert ONNX to TensorRT
-            log(f"Converting {clip_type} ONNX to TensorRT engine...", "DEBUG", True)
-            self._onnx_to_tensorrt(onnx_path, engine_path, clip_type,
-                                prompt_batch_min, prompt_batch_opt, prompt_batch_max)
-            
-            log(f"{clip_type} TensorRT engine created successfully", "INFO", True)
-            
-        except Exception as e:
-            log_error_with_traceback(f"Failed to create {clip_type} TensorRT engine", e)
-            raise
-        finally:
-            # Always clean up ONNX files and any temporary files
-            self._cleanup_temporary_files(onnx_path)
+
     
     def _onnx_to_tensorrt(self, onnx_path, engine_path, clip_type,
                          prompt_batch_min, prompt_batch_opt, prompt_batch_max):
@@ -796,312 +787,3 @@ class DualCLIPToTensorRT:
         except Exception as e:
             # Only log if there's a major cleanup error
             log(f"Error during cleanup: {str(e)}", "DEBUG", True)
-
-class DualCLIPTensorRTLoader:
-    @classmethod
-    def INPUT_TYPES(s):
-        tensorrt_engines = get_existing_tensorrt_engines()
-        default_engine = tensorrt_engines[0] if tensorrt_engines and "No TensorRT engines found" not in tensorrt_engines[0] else ""
-        
-        return {"required": {
-            "engine_name": (tensorrt_engines, {"default": default_engine}),
-        }}
-
-    RETURN_TYPES = ("CLIP_TENSORRT",)
-    RETURN_NAMES = ("clip_tensorrt",)
-    FUNCTION = "load_tensorrt_clip"
-    CATEGORY = "vovlerTools"
-
-    def load_tensorrt_clip(self, engine_name):
-        
-        try:
-            if "No TensorRT engines found" in engine_name:
-                error_msg = "No TensorRT engines found. Please convert CLIP models first."
-                log(error_msg, "ERROR", True)
-                log(f"TensorRT output directory: {tensorrt_output_dir}", "ERROR", True)
-                raise ValueError(error_msg)
-            
-            if "Error scanning" in engine_name:
-                error_msg = "Error accessing TensorRT engines directory. Check permissions."
-                log(error_msg, "ERROR", True)
-                raise ValueError(error_msg)
-            
-            engine_path = os.path.join(tensorrt_output_dir, engine_name)
-            
-            # Validate engine file access
-            if not validate_file_access(engine_path, "read"):
-                error_msg = f"Cannot access TensorRT engine file: {engine_name}"
-                log(f"Full path: {engine_path}", "ERROR", True)
-                raise FileNotFoundError(error_msg)
-            
-            # Check if file is actually a TensorRT engine
-            if not engine_name.endswith('.engine'):
-                log(f"Warning: File does not have .engine extension: {engine_name}", "WARNING", True)
-            
-            engine_size = os.path.getsize(engine_path) / (1024*1024)
-            if engine_size < 1:
-                log(f"Warning: Engine file is very small ({engine_size:.1f}MB), may be corrupted", "WARNING", True)
-            
-            log(f"Loading dual CLIP SDXL TensorRT engine: {engine_name} ({engine_size:.1f}MB)", "INFO", True)
-            
-            # Load TensorRT engine
-            log("Initializing TensorRT runtime...", "DEBUG", True)
-            TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-            
-            try:
-                with open(engine_path, 'rb') as f:
-                    engine_data = f.read()
-                    if len(engine_data) == 0:
-                        raise ValueError("Engine file is empty")
-                    
-                    log(f"Engine data loaded: {len(engine_data)} bytes", "DEBUG", True)
-                    
-                    runtime = trt.Runtime(TRT_LOGGER)
-                    if not runtime:
-                        raise RuntimeError("Failed to create TensorRT runtime")
-                    
-                    engine = runtime.deserialize_cuda_engine(engine_data)
-                    if not engine:
-                        raise RuntimeError("Failed to deserialize TensorRT engine")
-                        
-            except Exception as load_error:
-                log_error_with_traceback(f"Failed to load engine file: {engine_name}", load_error)
-                raise
-            
-            log("Creating execution context...", "DEBUG", True)
-            context = engine.create_execution_context()
-            if not context:
-                raise RuntimeError("Failed to create TensorRT execution context")
-            
-            # Get all input/output bindings
-            log("Analyzing engine bindings...", "DEBUG", True)
-            num_bindings = engine.num_io_tensors
-            log(f"Total bindings found: {num_bindings}", "DEBUG", True)
-            
-            input_bindings = []
-            output_bindings = []
-            
-            for i in range(num_bindings):
-                tensor_name = engine.get_tensor_name(i)
-                if engine.get_tensor_mode(tensor_name) == trt.TensorIOMode.INPUT:
-                    input_bindings.append(tensor_name)
-                else:
-                    output_bindings.append(tensor_name)
-            
-            if len(input_bindings) == 0:
-                raise ValueError("No input bindings found in engine")
-            if len(output_bindings) == 0:
-                raise ValueError("No output bindings found in engine")
-            
-            # Get tensor shapes
-            input_shapes = {}
-            output_shapes = {}
-            
-            for binding in input_bindings:
-                shape = engine.get_tensor_shape(binding)
-                input_shapes[binding] = shape
-                log(f"Input binding '{binding}': {shape}", "DEBUG", True)
-                
-            for binding in output_bindings:
-                shape = engine.get_tensor_shape(binding)
-                output_shapes[binding] = shape
-                log(f"Output binding '{binding}': {shape}", "DEBUG", True)
-            
-            # Validate expected SDXL structure
-            expected_inputs = ["input_ids_clip_l", "input_ids_clip_g"]
-            expected_outputs = ["text_embeddings_clip_l", "text_embeddings_clip_g", "pooled_output_clip_g"]
-            
-            missing_inputs = [inp for inp in expected_inputs if inp not in input_bindings]
-            missing_outputs = [out for out in expected_outputs if out not in output_bindings]
-            
-            if missing_inputs:
-                log(f"Warning: Missing expected input bindings: {missing_inputs}", "WARNING", True)
-            if missing_outputs:
-                log(f"Warning: Missing expected output bindings: {missing_outputs}", "WARNING", True)
-            
-            clip_tensorrt_data = {
-                "engine_name": engine_name,
-                "engine": engine,
-                "context": context,
-                "input_bindings": input_bindings,
-                "output_bindings": output_bindings,
-                "input_shapes": input_shapes,
-                "output_shapes": output_shapes,
-                "num_inputs": len(input_bindings),
-                "num_outputs": len(output_bindings),
-                "max_sequence_length": 77,  # Always 77 for SDXL
-                "precision": "fp16",  # Always fp16
-                "engine_size_mb": engine_size
-            }
-            
-            log(f"Dual CLIP SDXL TensorRT engine loaded successfully", "INFO", True)
-            log(f"Input bindings: {input_bindings}", "INFO", True)
-            log(f"Output bindings: {output_bindings}", "INFO", True)
-            log(f"Token length: 77 (SDXL), Precision: FP16", "INFO", True)
-            
-            return (clip_tensorrt_data,)
-            
-        except Exception as e:
-            log_error_with_traceback(f"Failed to load TensorRT engine: {engine_name}", e)
-            
-            # Provide helpful suggestions
-            if "permission" in str(e).lower():
-                log(f"Suggestion: Check file permissions for {tensorrt_output_dir}", "INFO", True)
-            elif "deserialize" in str(e).lower():
-                log("Suggestion: Engine file may be corrupted, try recreating it", "INFO", True)
-            elif "runtime" in str(e).lower():
-                log("Suggestion: Check TensorRT installation and CUDA compatibility", "INFO", True)
-            
-            raise
-
-class DualCLIPTensorRTTextEncode:
-    @classmethod
-    def INPUT_TYPES(s):
-        return {"required": {
-            "clip_tensorrt": ("CLIP_TENSORRT",),
-            "text": ("STRING", {"multiline": True, "default": ""}),
-            "text_clip_g": ("STRING", {"multiline": True, "default": ""}),
-        }}
-
-    RETURN_TYPES = ("CONDITIONING",)
-    RETURN_NAMES = ("conditioning",)
-    FUNCTION = "encode_text"
-    CATEGORY = "vovlerTools"
-
-    def encode_text(self, clip_tensorrt, text, text_clip_g=""):
-        """
-        Encode text using the dual CLIP SDXL TensorRT engine
-        Always uses 77 tokens and fp16 precision
-        """
-        
-        try:
-            # Validate inputs
-            if not clip_tensorrt:
-                error_msg = "CLIP TensorRT data is None or empty"
-                log(error_msg, "ERROR", True)
-                raise ValueError(error_msg)
-            
-            if not isinstance(clip_tensorrt, dict):
-                error_msg = f"CLIP TensorRT data must be a dictionary, got {type(clip_tensorrt)}"
-                log(error_msg, "ERROR", True)
-                raise TypeError(error_msg)
-            
-            # Validate required keys in clip_tensorrt
-            required_keys = ["engine", "context", "input_bindings", "output_bindings"]
-            missing_keys = [key for key in required_keys if key not in clip_tensorrt]
-            if missing_keys:
-                error_msg = f"Missing required keys in CLIP TensorRT data: {missing_keys}"
-                log(error_msg, "ERROR", True)
-                raise ValueError(error_msg)
-            
-            # Validate text inputs
-            if text is None:
-                text = ""
-            if text_clip_g is None:
-                text_clip_g = ""
-                
-            if not isinstance(text, str):
-                log(f"Converting text to string from {type(text)}", "WARNING", True)
-                text = str(text)
-            if not isinstance(text_clip_g, str):
-                log(f"Converting text_clip_g to string from {type(text_clip_g)}", "WARNING", True)
-                text_clip_g = str(text_clip_g)
-            
-            if not text.strip():
-                text = ""
-                log("Empty text provided for CLIP-L", "DEBUG", True)
-            
-            if not text_clip_g.strip():
-                text_clip_g = text  # Use same text for CLIP-G if not specified
-                log("Using same text for both CLIP-L and CLIP-G", "DEBUG", True)
-            
-            # Check text length
-            if len(text) > 1000:
-                log(f"Warning: Very long text for CLIP-L ({len(text)} chars), may be truncated", "WARNING", True)
-            if len(text_clip_g) > 1000:
-                log(f"Warning: Very long text for CLIP-G ({len(text_clip_g)} chars), may be truncated", "WARNING", True)
-            
-            log(f"Encoding text with dual CLIP SDXL TensorRT engine", "INFO", True)
-            log(f"Text CLIP-L: {text[:50]}{'...' if len(text) > 50 else ''}", "DEBUG", True)
-            log(f"Text CLIP-G: {text_clip_g[:50]}{'...' if len(text_clip_g) > 50 else ''}", "DEBUG", True)
-            
-            # Validate engine state
-            engine = clip_tensorrt.get("engine")
-            context = clip_tensorrt.get("context")
-            
-            if not engine:
-                raise ValueError("TensorRT engine is None or invalid")
-            if not context:
-                raise ValueError("TensorRT execution context is None or invalid")
-            
-            # Log engine information
-            engine_name = clip_tensorrt.get("engine_name", "unknown")
-            engine_size = clip_tensorrt.get("engine_size_mb", 0)
-            log(f"Using engine: {engine_name} ({engine_size:.1f}MB)", "DEBUG", True)
-            
-            # In a real implementation, you would:
-            # 1. Tokenize the input texts to 77 tokens each
-            # 2. Run TensorRT inference with fp16 precision
-            # 3. Process the CLIP-L and CLIP-G outputs
-            # 4. Combine them into SDXL conditioning format
-            # 5. Return proper conditioning data with pooled outputs
-            
-            log("Creating placeholder conditioning (real implementation would run TensorRT inference)", "DEBUG", True)
-            
-            # For now, return placeholder conditioning for SDXL
-            batch_size = 1
-            # SDXL typically uses:
-            # - CLIP-L: 768-dim embeddings
-            # - CLIP-G: 1280-dim embeddings + pooled output
-            clip_l_dim = 768
-            clip_g_dim = 1280
-            
-            # Create dummy embeddings (in practice, these come from TensorRT inference)
-            try:
-                clip_l_embeddings = torch.zeros((batch_size, 77, clip_l_dim), dtype=torch.float16)
-                clip_g_embeddings = torch.zeros((batch_size, 77, clip_g_dim), dtype=torch.float16)
-                pooled_output = torch.zeros((batch_size, clip_g_dim), dtype=torch.float16)
-            except Exception as tensor_error:
-                log_error_with_traceback("Failed to create output tensors", tensor_error)
-                raise
-            
-            # SDXL conditioning format combines both CLIP outputs
-            # In practice, you would concatenate or process them according to SDXL spec
-            try:
-                combined_embeddings = torch.cat([clip_l_embeddings, clip_g_embeddings], dim=-1)  # Shape: [1, 77, 2048]
-            except Exception as concat_error:
-                log_error_with_traceback("Failed to concatenate embeddings", concat_error)
-                raise
-            
-            # Validate output shapes
-            expected_combined_shape = (batch_size, 77, clip_l_dim + clip_g_dim)
-            if combined_embeddings.shape != expected_combined_shape:
-                error_msg = f"Combined embeddings shape mismatch: got {combined_embeddings.shape}, expected {expected_combined_shape}"
-                log(error_msg, "ERROR", True)
-                raise ValueError(error_msg)
-            
-            conditioning = [[combined_embeddings, {"pooled_output": pooled_output}]]
-            
-            log(f"SDXL text encoding complete (77 tokens, FP16)", "INFO", True)
-            log(f"CLIP-L embedding shape: {clip_l_embeddings.shape}", "DEBUG", True)
-            log(f"CLIP-G embedding shape: {clip_g_embeddings.shape}", "DEBUG", True)
-            log(f"Combined embedding shape: {combined_embeddings.shape}", "DEBUG", True)
-            log(f"Pooled output shape: {pooled_output.shape}", "DEBUG", True)
-            
-            return (conditioning,)
-            
-        except Exception as e:
-            log_error_with_traceback("Failed to encode text with TensorRT CLIP", e)
-            
-            # Provide helpful suggestions
-            error_str = str(e).lower()
-            if "memory" in error_str:
-                log("Suggestion: Reduce text length or free up GPU memory", "INFO", True)
-            elif "tensorrt" in error_str:
-                log("Suggestion: Check if TensorRT engine is properly loaded", "INFO", True)
-            elif "shape" in error_str:
-                log("Suggestion: Engine may not be compatible with SDXL format", "INFO", True)
-            elif "cuda" in error_str:
-                log("Suggestion: Check CUDA availability and GPU memory", "INFO", True)
-            
-            raise

@@ -7,8 +7,6 @@ NODE_CLASS_MAPPINGS = {
     "WDTaggerONNXtoTENSORRT": WDTaggerONNXtoTENSORRT,
     "WD14BlackListLoader": WD14BlackListLoader,
     "DualCLIPToTensorRT": DualCLIPToTensorRT,
-    "DualCLIPTensorRTLoader": DualCLIPTensorRTLoader,
-    "DualCLIPTensorRTTextEncode": DualCLIPTensorRTTextEncode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -17,8 +15,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WDTaggerONNXtoTENSORRT": "WD14 ONNX to TensorRT Converter 🚀",
     "WD14BlackListLoader": "WD14 BlackList Loader 🚫",
     "DualCLIPToTensorRT": "Dual CLIP to TensorRT Converter 🔄⚡",
-    "DualCLIPTensorRTLoader": "Dual CLIP TensorRT Loader 📥⚡",
-    "DualCLIPTensorRTTextEncode": "Dual CLIP TensorRT Text Encode ✏️⚡",
-}
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
