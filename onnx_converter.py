@@ -27,7 +27,7 @@ class SDXLDirectoryToOnnx:
     """
     A ComfyUI node to export a model from a diffusers directory structure into
     separate, optimized ONNX files. This is the robust version that correctly
-    instantiates OnnxConfig objects and handles missing config values.
+    instantiates OnnxConfig objects and handles missing config values via subclassing.
     """
     OUTPUT_NODE = True
     CATEGORY = "Export"
@@ -70,7 +70,7 @@ class SDXLDirectoryToOnnx:
             optimization_config = OptimizationConfig(optimization_level=optimization_level)
 
             optimizer.optimize(save_dir=model_path.parent, optimization_config=optimization_config)
-            print(f"\032[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
+            print(f"\033[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
         except Exception as e:
             print(f"\033[91m[ERROR] ONNX Exporter: Could not optimize {component_name}: {e}\033[0m")
             traceback.print_exc()
@@ -102,14 +102,16 @@ class SDXLDirectoryToOnnx:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
 
-                # THE KEY FIX: Prepare the override dictionary and pass it during object creation.
-                override_values = {
-                    "text_encoder_projection_dim": pipeline.text_encoder_2.config.projection_dim,
-                }
-                unet_config = UNetOnnxConfig(
-                    config=pipeline.unet.config,
-                    values_override=override_values
-                )
+                # THE KEY FIX: Create a custom OnnxConfig for the UNet that overrides the 'values_override' property.
+                class CustomUNetOnnxConfig(UNetOnnxConfig):
+                    def __init__(self, config):
+                        super().__init__(config)
+                    
+                    @property
+                    def values_override(self):
+                        return {"text_encoder_projection_dim": pipeline.text_encoder_2.config.projection_dim}
+                
+                unet_config = CustomUNetOnnxConfig(pipeline.unet.config)
 
                 export(model=pipeline.unet, config=unet_config, output=unet_path / "model.onnx", device=self.device, opset=14, dtype=onnx_dtype)
                 pipeline.unet.config.save_pretrained(unet_path)
