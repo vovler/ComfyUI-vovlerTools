@@ -9,11 +9,9 @@ from pathlib import Path
 import torch
 import onnxruntime
 from optimum.onnxruntime import ORTOptimizer, OptimizationConfig
-# Use the lower-level, more robust export function
-from optimum.onnx.convert import export
-# Import the main pipeline class, which is the key to solving the problem
+# CORRECTED: The 'convert' module is inside the 'exporters' subdirectory
+from optimum.exporters.onnx.convert import export
 from diffusers import StableDiffusionXLPipeline
-# Import ONNX configs for explicit VAE handling
 from optimum.exporters.onnx.model_configs import VaeEncoderOnnxConfig, VaeDecoderOnnxConfig
 
 # --- The Main Node Class ---
@@ -58,17 +56,15 @@ class SDXLDirectoryToOnnx:
             print("\033[93m[WARNING] ONNX Exporter: CUDAExecutionProvider not found. CPU will be used.\033[0m")
 
     def optimize_model(self, model_path: Path, component_name: str, optimization_level: int):
-        """Helper to optimize a saved ONNX model in-place."""
+        """Helper to optimize a saved ONNX model."""
         try:
             print(f"[INFO] ONNX Exporter: Optimizing {component_name}...")
+            # The optimizer expects a directory containing the model.onnx and config.json
             optimizer = ORTOptimizer.from_pretrained(model_path.parent)
             optimization_config = OptimizationConfig(optimization_level=optimization_level)
             
-            # To optimize safely, we save to a temporary directory and then replace the original
-            with tempfile.TemporaryDirectory() as tmp_opt_dir:
-                optimizer.optimize(save_dir=tmp_opt_dir, optimization_config=optimization_config)
-                # Replace the original un-optimized model with the optimized one
-                shutil.move(os.path.join(tmp_opt_dir, "model.onnx"), model_path)
+            # Save the optimized model back to the same parent directory, replacing the original
+            optimizer.optimize(save_dir=model_path.parent, optimization_config=optimization_config)
             print(f"\033[92m[SUCCESS] ONNX Exporter: Optimization complete for {component_name}.\033[0m")
         except Exception as e:
             print(f"\033[91m[ERROR] ONNX Exporter: Could not optimize {component_name}: {e}\033[0m")
@@ -91,8 +87,6 @@ class SDXLDirectoryToOnnx:
         pipeline = None
 
         try:
-            # --- The KEY FIX: Load the entire pipeline first ---
-            # This correctly initializes all components in memory, regardless of on-disk config quirks.
             print("\n[INFO] ONNX Exporter: Loading entire pipeline to resolve component configurations...")
             pipeline = StableDiffusionXLPipeline.from_pretrained(source_model_dir, torch_dtype=dtype).to(self.device)
             print("[INFO] ONNX Exporter: Pipeline loaded successfully.")
@@ -102,7 +96,7 @@ class SDXLDirectoryToOnnx:
                 print("\n[INFO] ONNX Exporter: Exporting UNet...")
                 unet_path = final_output_dir / "unet"
                 export(model=pipeline.unet, config=pipeline.unet.config, output=unet_path / "model.onnx", device=self.device, opset=14, fp16=use_fp16)
-                pipeline.unet.config.save_pretrained(unet_path) # Save config for the optimizer
+                pipeline.unet.config.save_pretrained(unet_path)
                 self.optimize_model(unet_path / "model.onnx", "UNet", optimization_level)
 
             # --- Text Encoders Export ---
@@ -145,7 +139,6 @@ class SDXLDirectoryToOnnx:
             traceback.print_exc()
             return {"ui": {"text": [f"An unexpected error occurred: {e}"]}}
         finally:
-            # Clean up the large pipeline object from memory
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
