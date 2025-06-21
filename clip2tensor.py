@@ -367,14 +367,14 @@ class DualCLIPToTensorRT:
                     super().__init__()
                     self.clip_l = clip_l_model
                 def forward(self, input_ids):
-                    return self.clip_l(input_ids=input_ids, return_dict=False)[0]
+                    return self.clip_l(input_tokens=input_ids)[0]
 
             class CLIP_G_Wrapper(torch.nn.Module):
                 def __init__(self, clip_g_model):
                     super().__init__()
                     self.clip_g = clip_g_model
                 def forward(self, input_ids):
-                    outputs = self.clip_g(input_ids=input_ids, return_dict=False)
+                    outputs = self.clip_g(input_ids=input_ids)
                     return outputs[0], outputs[1]
 
 
