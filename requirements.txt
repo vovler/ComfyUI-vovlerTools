@@ -1,6 +1,20 @@
+--extra-index-url https://pypi.ngc.nvidia.com
 tensorrt>=10.0.1
-onnx!=1.16.2
 optimum[onnxruntime-gpu]>=1.16.0
-transformers>=4.35.0
 onnxruntime-gpu>=1.16.0
 diffusers
+torch>=2.6.0
+diffusers>=0.33.1
+transformers>=4.51.3
+onnx>=1.18.0
+polygraphy>=0.49.0
+onnx_graphsurgeon
+
+# == Utility and Tokenizer Dependencies ==
+# Required by the underlying models for text processing.
+ftfy
+sentencepiece
+
+# == NVIDIA Toolchain for TensorRT and Quantization ==
+# For INT8/FP8 quantization, calibration, and optimization.
+nvidia-modelopt[torch,onnx]>=0.15.0
