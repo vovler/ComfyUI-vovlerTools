@@ -9,6 +9,8 @@ import folder_paths
 import torch
 import tensorrt as trt
 
+# pyright: reportAttributeAccessIssue=false
+
 # ========== UTILITY FUNCTIONS ==========
 
 def get_ext_dir(subpath=None, mkdir=False):
@@ -579,7 +581,7 @@ class WD14TaggerAndImageFilterer:
 
 class WDTaggerONNXtoTENSORRT:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         # Only show ONNX models for conversion
         onnx_models = [os.path.splitext(m)[0] for m in get_installed_models_onnx()]
         if not onnx_models:
